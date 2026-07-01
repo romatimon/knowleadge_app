@@ -1,0 +1,12 @@
+services:
+  knowledge-app:
+    build: .
+    container_name: knowledge-base-app
+    ports:
+      - "8501:8501"
+    volumes:
+      # Монтируем ВСЮ папку проекта
+      - .:/app
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Moscow
