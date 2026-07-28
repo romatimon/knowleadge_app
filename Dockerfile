@@ -14,9 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем всё приложение
 COPY . .
 
-# Создаём папку для базы данных
-RUN mkdir -p /app/data
-
 # Открываем порт
 EXPOSE 8501
 
