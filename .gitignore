@@ -5,6 +5,7 @@ venv/
 
 
 *.json
+*.db
 
 backups/
 backup/

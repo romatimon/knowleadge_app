@@ -1,28 +1,76 @@
-import streamlit as st
-import pandas as pd
 import json
 import os
 import re
+import shutil
+import sqlite3
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
 
 # Настройка конфигурации страницы
 st.set_page_config(page_title="База знаний менеджера", layout="wide")
 
-ADMIN_USERS = {"admin": "secret123"}
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "secret123")
+BASE_DIR = Path(__file__).resolve().parent
+JSON_PATH = BASE_DIR / "database.json"
+SQLITE_PATH = BASE_DIR / "knowledge.db"
+TABLE_KEYS = [
+    "faq",
+    "contacts_experts",
+    "contacts_labs",
+    "testing_battery",
+    "texts_table",
+    "samples_nd",
+]
+MATERIAL_METADATA = {
+    "faq": ["Алгоритм", "Дата обновления", "Источник"],
+    "texts_table": ["Дата обновления", "Источник"],
+}
 
 # ===== 1. ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ =====
 def save_all_data(data):
-    """Сохраняет все данные в файл database.json"""
-    with open("database.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Сохраняет таблицы в SQLite и делает резервную копию базы."""
+    if SQLITE_PATH.exists():
+        os.makedirs("backups", exist_ok=True)
+        backup_name = datetime.now(UTC).strftime("knowledge_%Y%m%d_%H%M%S_%f.db")
+        shutil.copy2(SQLITE_PATH, Path("backups") / backup_name)
+
+    with sqlite3.connect(SQLITE_PATH) as connection:
+        for table_name, table_data in data.items():
+            frame = table_data if isinstance(table_data, pd.DataFrame) else pd.DataFrame(table_data)
+            if frame.empty and not frame.columns.tolist():
+                continue
+            frame.to_sql(table_name, connection, if_exists="replace", index=False)
 
 def load_all_data():
-    """Загружает данные из database.json"""
-    if os.path.exists("database.json"):
-        with open("database.json", "r", encoding="utf-8") as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return {}
+    """Загружает данные из SQLite или мигрирует их из JSON."""
+    if SQLITE_PATH.exists():
+        with sqlite3.connect(SQLITE_PATH) as connection:
+            tables = pd.read_sql_query(
+                "SELECT name FROM sqlite_master WHERE type='table'",
+                connection,
+            )["name"].tolist()
+            existing_tables = [table_name for table_name in TABLE_KEYS if table_name in tables]
+            if existing_tables:
+                return {
+                    table_name: pd.read_sql_query(
+                        f'SELECT * FROM "{table_name}"', connection
+                    ).to_dict(orient="records")
+                    for table_name in existing_tables
+                }
+
+    if JSON_PATH.exists():
+        try:
+            with JSON_PATH.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+            if isinstance(data, dict):
+                save_all_data(data)
+                return data
+        except json.JSONDecodeError:
+            pass
+
     return {}
 
 def normalize(text):
@@ -45,16 +93,30 @@ def search_df(df, query):
     if df.empty or not query.strip():
         return df
 
-    query = normalize(query)
+    search_terms = normalize(query).split()
+    if not search_terms:
+        return df
 
-    mask = (
+    normalized_df = (
         df.fillna("")
         .astype(str)
-        .apply(lambda col: col.map(normalize).str.contains(query, regex=False))
-        .any(axis=1)
+        .apply(lambda col: col.map(normalize))
     )
+    mask = pd.Series(True, index=df.index)
+    for term in search_terms:
+        term_matches = normalized_df.apply(
+            lambda col, term=term: col.str.contains(term, regex=False)
+        ).any(axis=1)
+        mask &= term_matches
 
     return df[mask]
+
+def ensure_material_columns(frame, table_name):
+    """Добавляет служебные поля, не изменяя оригинальный текст материала."""
+    for column in MATERIAL_METADATA.get(table_name, []):
+        if column not in frame.columns:
+            frame[column] = ""
+    return frame
 
 def highlight_text(text, query):
     """Подсветка найденного слова в тексте с помощью HTML-тега <mark>"""
@@ -71,21 +133,28 @@ if "db" not in st.session_state or not st.session_state.db:
         raw = {}
         
     st.session_state.db = {}
-    table_keys = ["faq", "contacts_experts", "contacts_labs", "testing_battery", "texts_table", "samples_nd"]
-    
-    for key in table_keys:
+    for key in TABLE_KEYS:
         saved_data = raw.get(key)
         if saved_data and len(saved_data) > 0:
-            st.session_state.db[key] = pd.DataFrame(saved_data)
+            frame = pd.DataFrame(saved_data)
+            if key == "texts_table":
+                frame = frame.drop(columns=["Категория"], errors="ignore")
+            frame = ensure_material_columns(frame, key)
+            st.session_state.db[key] = frame
         else:
             if key == "texts_table":
-                st.session_state.db[key] = pd.DataFrame(columns=["Категория", "Заголовок", "Текст инструкции"])
+                st.session_state.db[key] = pd.DataFrame(
+                    columns=["Заголовок", "Текст инструкции", "Дата обновления", "Источник"]
+                )
             elif key == "faq":
                 st.session_state.db[key] = pd.DataFrame(columns=[
                     "Тип",
                     "Вопрос / Ситуация",
                     "Ответ",
-                    "Важно"
+                    "Алгоритм",
+                    "Важно",
+                    "Дата обновления",
+                    "Источник",
                 ])
             elif key == "contacts_experts":
                 st.session_state.db[key] = pd.DataFrame(columns=[
@@ -108,23 +177,22 @@ if "db" not in st.session_state or not st.session_state.db:
                     "ГОСТ на отбор"
                 ])
 
+# ===== 3. ВХОД АДМИНИСТРАТОРА =====
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
-# ===== 3. БОКОВАЯ ПАНЕЛЬ ДЛЯ ВХОДА АДМИНА =====
 with st.sidebar:
-    st.header("Вход для администратора")
     if not st.session_state.is_admin:
-        u = st.text_input("Логин", key="u_reg")
-        p = st.text_input("Пароль", type="password", key="p_reg")
+        st.header("Вход администратора")
+        p = st.text_input("Пароль", type="password", key="admin_password")
         if st.button("Войти", width="stretch"):
-            if u in ADMIN_USERS and ADMIN_USERS[u] == p:
+            if p == ADMIN_PASSWORD:
                 st.session_state.is_admin = True
                 st.rerun()
             else:
                 st.error("Неверный пароль")
     else:
-        st.success("🔓 Режим редактора включен")
+        st.success("Режим администратора включен")
         if st.button("Выйти", width="stretch"):
             st.session_state.is_admin = False
             st.rerun()
@@ -132,43 +200,51 @@ with st.sidebar:
 # ===== 4. ОСНОВНОЙ ИНТЕРФЕЙС И ГЛОБАЛЬНЫЙ ПОИСК =====
 st.title("📚 Единая база знаний для менеджеров")
 
-with st.expander("📖 Как пользоваться базой знаний", expanded=False):
-    st.markdown("""
+st.markdown(
+    """
+    <style>
+    :root {
+        --kb-accent: #1f6f78;
+        --kb-accent-soft: #e8f3f3;
+        --kb-border: #d9e2e3;
+        --kb-muted: #607174;
+    }
 
-Добро пожаловать в базу знаний менеджера.
+    [data-testid="stTextInput"] {
+        margin-bottom: 0.75rem;
+    }
 
-Используйте поле **🔍 Поиск** в верхней части страницы, чтобы быстро найти нужную информацию. Поиск работает сразу по всем разделам базы и подсвечивает найденные совпадения.
+    [data-testid="stTextInput"] input:focus {
+        border-color: var(--kb-accent);
+        box-shadow: 0 0 0 1px var(--kb-accent);
+    }
 
-После поиска **переключайтесь между вкладками**, чтобы просмотреть найденную информацию в соответствующем разделе базы знаний.
+    button[data-baseweb="tab"] {
+        color: var(--kb-muted);
+        font-weight: 600;
+    }
 
-## 📂 Разделы базы знаний
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: var(--kb-accent);
+    }
 
-### ❓ Типовые ситуации (FAQ)
+    [data-testid="stExpander"] {
+        border: 1px solid var(--kb-border);
+        border-radius: 6px;
+        margin-bottom: 0.65rem;
+    }
 
-- ответы на часто возникающие вопросы;
-- готовые алгоритмы действий;
-- внутренние правила и исключения.
+    [data-testid="stExpander"] summary:hover {
+        background: var(--kb-accent-soft);
+    }
 
-### 📊 Сроки испытаний и разрешительные документы
-
-- сроки проведения испытаний;
-- сроки действия сертификатов и деклараций;
-- информация по испытаниям аккумуляторов и батарей.
-
-### 📝 Инструкции и алгоритмы
-
-- пошаговые инструкции по внутренним процессам;
-- порядок выполнения нестандартных операций;
-- рабочие алгоритмы.
-
-## 💡 Полезные рекомендации
-
-- Используйте разные варианты ключевых слов, если поиск ничего не нашел.
-- Нормативные документы можно искать по номеру полностью или частично (например, **007/2011** или **ТР ТС 007**).
-- Если нужной информации нет в базе или она требует уточнения — обратитесь к профильному специалисту.
-
-> ⚠️ **База знаний регулярно обновляется.** Если обнаружили ошибку или отсутствующую информацию, сообщите администратору для внесения изменений.
-""")
+    [data-testid="stCaptionContainer"] {
+        color: var(--kb-muted);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 def clear_search():
     """Очищает поле поиска"""
@@ -179,14 +255,15 @@ col_search, col_clear = st.columns([6, 1])
 
 with col_search:
     search_query = st.text_input(
-        "🔍 Поиск по всей базе знаний", 
+        "Поиск по всей базе знаний", 
         placeholder="Введите ключевое слово (например: МЧД, 007/2011, ДС 353)...",
         key="search_input_key"
     )
+    st.caption("Поиск выполняется по материалам выбранной вкладки.")
 
 with col_clear:
     st.markdown("<div style='padding-top: 28px;'></div>", unsafe_allow_html=True)
-    if st.button("❌ Сбросить", width="stretch", on_click=clear_search):
+    if st.button("Сбросить", width="stretch", on_click=clear_search):
         st.rerun()
 
 # Подготовка отфильтрованных данных
@@ -210,9 +287,8 @@ tab4_title = "📝 Инструкции и алгоритмы"
 tab1, tab5, tab4 = st.tabs([tab1_title, tab5_title, tab4_title], key='fixed_main_tabs')
 
 def save_everything():
-    """Сохраняет все DataFrame в JSON-файл"""
-    json_ready = {k: v.to_dict(orient="records") for k, v in st.session_state.db.items()}
-    save_all_data(json_ready)
+    """Сохраняет все DataFrame в SQLite."""
+    save_all_data(st.session_state.db)
 
 # Универсальная функция отображения со встроенной картой автоматических сокращений
 def render_table_view(db_key, filtered_df, row_height=80):
@@ -245,44 +321,232 @@ def render_table_view(db_key, filtered_df, row_height=80):
         )
     
     if st.session_state.is_admin:
+        original_df = st.session_state.db[db_key]
+        with st.expander("Добавить новую строку"):
+            with st.form(f"add_row_{db_key}"):
+                new_values = {}
+                for column in original_df.columns:
+                    if len(column) > 45:
+                        new_values[column] = st.text_area(column, height=100)
+                    else:
+                        new_values[column] = st.text_input(column)
+                add_row = st.form_submit_button("Добавить строку", type="primary")
+
+            if add_row:
+                if not any(str(value).strip() for value in new_values.values()):
+                    st.error("Заполните хотя бы одно поле.")
+                else:
+                    st.session_state.db[db_key] = pd.concat(
+                        [original_df, pd.DataFrame([new_values])],
+                        ignore_index=True,
+                    )
+                    save_everything()
+                    st.success("Строка добавлена.")
+                    st.rerun()
+
         edited_df = st.data_editor(
             filtered_df, 
             num_rows="dynamic", 
             row_height=row_height, 
             width="stretch",
-            hide_index=False,
+            hide_index=True,
             column_config=config,
             key=f"editor_{db_key}"
         )
         if not edited_df.equals(filtered_df):
-            if search_query.strip():
-                st.session_state.db[db_key].loc[edited_df.index] = edited_df
-            else:
+            original_df = st.session_state.db[db_key]
+            if filtered_df.index.equals(original_df.index):
                 st.session_state.db[db_key] = edited_df
+            else:
+                remaining_df = original_df.drop(
+                    index=filtered_df.index,
+                    errors="ignore"
+                )
+                st.session_state.db[db_key] = pd.concat(
+                    [remaining_df, edited_df],
+                    ignore_index=True
+                )
             
             save_everything()
             st.toast("Изменения сохранены!", icon="💾")
             st.rerun()
     else:
         calculated_height = (len(filtered_df) * row_height) + 40
-        st.dataframe(filtered_df, row_height=row_height, width="stretch", height=calculated_height, hide_index=False, column_config=config)
+        st.dataframe(filtered_df, row_height=row_height, width="stretch", height=calculated_height, hide_index=True, column_config=config)
+
+def filter_table_by_column(filtered_df, column, label, key):
+    """Добавляет простой фильтр к справочной таблице."""
+    if filtered_df.empty or column not in filtered_df.columns:
+        return filtered_df
+
+    values = sorted(
+        value for value in filtered_df[column].fillna("").astype(str).unique()
+        if value.strip()
+    )
+    if not values:
+        return filtered_df
+
+    selected = st.selectbox(label, ["Все"] + values, key=key)
+    if selected == "Все":
+        return filtered_df
+    return filtered_df[filtered_df[column].fillna("").astype(str) == selected]
+
+def render_faq_editor():
+    """Показывает форму добавления и редактирования FAQ для администратора."""
+    faq_df = st.session_state.db["faq"]
+    options = [None] + faq_df.index.tolist()
+    selected_index = st.selectbox(
+        "Материал для редактирования",
+        options,
+        format_func=lambda index: "Новый материал" if index is None else (
+            f"{index + 1}. {str(faq_df.loc[index, 'Вопрос / Ситуация'])[:100]}"
+        ),
+        key="faq_material_select",
+    )
+    row = faq_df.loc[selected_index] if selected_index is not None else {}
+    form_key = f"faq_material_form_{selected_index if selected_index is not None else 'new'}"
+
+    with st.form(form_key):
+        faq_type = st.selectbox(
+            "Тип записи",
+            ["Ситуация", "Справка", "Правило"],
+            index=["Ситуация", "Справка", "Правило"].index(row.get("Тип", "Ситуация"))
+            if row.get("Тип", "Ситуация") in ["Ситуация", "Справка", "Правило"] else 0,
+        )
+        question = st.text_input(
+            "Вопрос / ситуация",
+            value=str(row.get("Вопрос / Ситуация", "")),
+        )
+        answer = st.text_area(
+            "Ответ",
+            value=str(row.get("Ответ", "")),
+            height=180,
+        )
+        algorithm = st.text_area(
+            "Алгоритм, если есть",
+            value=str(row.get("Алгоритм", "")),
+            height=180,
+        )
+        important = st.text_area(
+            "Важно",
+            value=str(row.get("Важно", "")),
+            height=120,
+        )
+        updated_at = st.date_input(
+            "Дата обновления",
+            value=datetime.fromisoformat(row["Дата обновления"]).date()
+            if row.get("Дата обновления", "") else datetime.now(UTC).date(),
+        )
+        source = st.text_input(
+            "Источник",
+            value=str(row.get("Источник", "")),
+            placeholder="Письмо Outlook, файл или ссылка",
+        )
+        submitted = st.form_submit_button("Сохранить материал", type="primary")
+
+    if submitted:
+        if not question.strip() or not answer.strip():
+            st.error("Заполните вопрос / ситуацию и ответ.")
+        else:
+            values = {
+                "Тип": faq_type,
+                "Вопрос / Ситуация": question,
+                "Ответ": answer,
+                "Алгоритм": algorithm,
+                "Важно": important,
+                "Дата обновления": updated_at.isoformat(),
+                "Источник": source,
+            }
+            if selected_index is None:
+                st.session_state.db["faq"] = pd.concat(
+                    [faq_df, pd.DataFrame([values])], ignore_index=True
+                )
+            else:
+                for column, value in values.items():
+                    st.session_state.db["faq"].loc[selected_index, column] = value
+            save_everything()
+            st.success("Материал сохранён.")
+            st.rerun()
+
+    if selected_index is not None:
+        confirm_delete = st.checkbox("Подтверждаю удаление этого материала", key=f"faq_delete_{selected_index}")
+        if st.button("Удалить материал", disabled=not confirm_delete, key=f"faq_delete_button_{selected_index}"):
+            st.session_state.db["faq"] = faq_df.drop(index=selected_index)
+            save_everything()
+            st.rerun()
+
+def render_text_editor():
+    """Показывает форму добавления и редактирования инструкции для администратора."""
+    texts_df = st.session_state.db["texts_table"]
+    options = [None] + texts_df.index.tolist()
+    selected_index = st.selectbox(
+        "Материал для редактирования",
+        options,
+        format_func=lambda index: "Новый материал" if index is None else (
+            f"{index + 1}. {str(texts_df.loc[index, 'Заголовок'])[:100]}"
+        ),
+        key="text_material_select",
+    )
+    row = texts_df.loc[selected_index] if selected_index is not None else {}
+    form_key = f"text_material_form_{selected_index if selected_index is not None else 'new'}"
+
+    with st.form(form_key):
+        title = st.text_input("Заголовок", value=str(row.get("Заголовок", "")))
+        instruction = st.text_area(
+            "Текст инструкции",
+            value=str(row.get("Текст инструкции", "")),
+            height=360,
+        )
+        updated_at = st.date_input(
+            "Дата обновления",
+            value=datetime.fromisoformat(row["Дата обновления"]).date()
+            if row.get("Дата обновления", "") else datetime.now(UTC).date(),
+        )
+        source = st.text_input(
+            "Источник",
+            value=str(row.get("Источник", "")),
+            placeholder="Письмо Outlook, файл или ссылка",
+        )
+        submitted = st.form_submit_button("Сохранить материал", type="primary")
+
+    if submitted:
+        if not title.strip() or not instruction.strip():
+            st.error("Заполните заголовок и текст инструкции.")
+        else:
+            values = {
+                "Заголовок": title,
+                "Текст инструкции": instruction,
+                "Дата обновления": updated_at.isoformat(),
+                "Источник": source,
+            }
+            if selected_index is None:
+                st.session_state.db["texts_table"] = pd.concat(
+                    [texts_df, pd.DataFrame([values])], ignore_index=True
+                )
+            else:
+                for column, value in values.items():
+                    st.session_state.db["texts_table"].loc[selected_index, column] = value
+            save_everything()
+            st.success("Материал сохранён.")
+            st.rerun()
+
+    if selected_index is not None:
+        confirm_delete = st.checkbox("Подтверждаю удаление этой инструкции", key=f"text_delete_{selected_index}")
+        if st.button("Удалить инструкцию", disabled=not confirm_delete, key=f"text_delete_button_{selected_index}"):
+            st.session_state.db["texts_table"] = texts_df.drop(index=selected_index)
+            save_everything()
+            st.rerun()
 
 # Наполнение контентом вкладок
 with tab1:
-    st.subheader("❓ Типовые ситуации")
-
     if st.session_state.is_admin:
         st.info(
-            "Тип записи:\n"
-            "• 🛠️ Ситуация — алгоритм действий\n"
-            "• 📖 Справка — ответ на вопрос\n"
-            "• ⚖️ Правило — внутренние правила работы"
+            "Выберите существующий материал для редактирования или создайте новый. "
+            "Текст сохраняется без автоматических изменений."
         )
+        render_faq_editor()
 
-        render_table_view("faq", faq_filtered, row_height=120)
-
-        st.markdown("---")
-        st.markdown("### 👁️ Так это видят менеджеры")
+        st.caption("Предпросмотр для менеджеров")
 
     if faq_filtered.empty:
         if search_query.strip():
@@ -310,20 +574,11 @@ with tab1:
             for _, row in block.iterrows():
 
                 with st.expander(
-                    f"❓ {row['Вопрос / Ситуация']}",
+                    str(row["Вопрос / Ситуация"]),
                     expanded=bool(search_query.strip())
                 ):
 
-                    # Вопрос с подсветкой найденного
-                    st.markdown(
-                        highlight_text(
-                            str(row["Вопрос / Ситуация"]),
-                            search_query
-                        ),
-                        unsafe_allow_html=True
-                    )
-
-                    st.markdown("### ✅ Ответ")
+                    st.caption("Ответ")
 
                     # Ответ с подсветкой найденного
                     st.markdown(
@@ -334,9 +589,19 @@ with tab1:
                         unsafe_allow_html=True
                     )
 
+                    if str(row.get("Алгоритм", "")).strip():
+                        st.caption("Алгоритм")
+                        st.markdown(
+                            highlight_text(
+                                str(row["Алгоритм"]),
+                                search_query
+                            ),
+                            unsafe_allow_html=True
+                        )
+
                     # Важно с подсветкой найденного
                     if str(row["Важно"]).strip():
-
+                        st.caption("Важно")
                         st.markdown(
                             highlight_text(
                                 str(row["Важно"]),
@@ -345,9 +610,15 @@ with tab1:
                             unsafe_allow_html=True
                         )
 
-with tab5:
-    st.subheader("📊 Сроки проведения испытаний и сроки действия разрешительных документов")
+                    metadata = []
+                    if str(row.get("Дата обновления", "")).strip():
+                        metadata.append(f"Обновлено: {row['Дата обновления']}")
+                    if str(row.get("Источник", "")).strip():
+                        metadata.append(f"Источник: {row['Источник']}")
+                    if metadata:
+                        st.caption(" | ".join(metadata))
 
+with tab5:
     # ===== Испытания =====
     if not experts_filtered.empty or not search_query.strip():
 
@@ -374,7 +645,13 @@ with tab5:
 - При срочном выполнении ("на завтра") стоимость испытаний увеличивается в 2 раза
 """)
 
-            render_table_view("contacts_experts", experts_filtered, row_height=80)
+            experts_view = filter_table_by_column(
+                experts_filtered,
+                "Группа (вид) продукции",
+                "Фильтр по группе продукции",
+                "experts_group_filter",
+            )
+            render_table_view("contacts_experts", experts_view, row_height=80)
 
     # ===== Сроки действия документов =====
     if not labs_filtered.empty or not search_query.strip():
@@ -422,7 +699,13 @@ ___
 2. срок годности или срок службы установлен → на срок годности (службы), но не более 5 лет
 """)
 
-            render_table_view("contacts_labs", labs_filtered, row_height=80)
+            labs_view = filter_table_by_column(
+                labs_filtered,
+                "Регламент",
+                "Фильтр по регламенту",
+                "labs_regulation_filter",
+            )
+            render_table_view("contacts_labs", labs_view, row_height=80)
 
     # ===== АККУМУЛЯТОРЫ И БАТАРЕИ =====
     if not battary_filtred.empty or not search_query.strip():
@@ -452,7 +735,12 @@ ___
 
             render_table_view(
                 "testing_battery",
-                battary_filtred,
+                filter_table_by_column(
+                    battary_filtred,
+                    "Наименование продукции",
+                    "Фильтр по продукции",
+                    "battery_product_filter",
+                ),
                 row_height=80
             )
 
@@ -471,7 +759,12 @@ ___
 
             render_table_view(
                 "samples_nd",
-                samples_nd_filtered,
+                filter_table_by_column(
+                    samples_nd_filtered,
+                    "Группа (вид) продукции",
+                    "Фильтр по группе продукции",
+                    "samples_group_filter",
+                ),
                 row_height=80
             )
 
@@ -486,68 +779,34 @@ ___
         st.info("По вашему запросу ничего не найдено.")
 
 with tab4:
-    st.subheader("📝 Пошаговые руководства и алгоритмы работы")
-
     if st.session_state.is_admin:
         st.info(
-            "🛠️ Режим администратора: вы можете редактировать, добавлять "
-            "(кнопка + внизу) и удалять строки прямо в таблице."
+            "Выберите существующую инструкцию для редактирования или создайте новую. "
+            "Текст сохраняется без автоматических изменений."
         )
-        render_table_view("texts_table", texts_filtered, row_height=120)
-        st.markdown("---")
-        st.markdown("### 👁️ Как это видят обычные менеджеры:")
-
-    categorized_matches = {}
+        render_text_editor()
 
     if not texts_filtered.empty:
-
         for _, row in texts_filtered.iterrows():
-
-            category = str(row["Категория"]).strip() if pd.notna(row["Категория"]) else ""
-            if not category:
-                category = "Общие инструкции"
-
-            categorized_matches.setdefault(category, []).append(row)
-
-    if categorized_matches:
-
-        for category, rows in categorized_matches.items():
-
-            # Если категория пустая — показываем инструкции сразу
-            if category == "Общие инструкции":
-
-                for _, row in pd.DataFrame(rows).iterrows():
-
-                    with st.expander(
-                        f"📘 {row['Заголовок']}",
-                        expanded=bool(search_query.strip())
-                    ):
-                        st.markdown(
-                            highlight_text(
-                                str(row["Текст инструкции"]),
-                                search_query
-                            ),
-                            unsafe_allow_html=True
-                        )
-
-            else:
-
-                with st.expander(
-                    f"📂 {category}",
-                    expanded=bool(search_query.strip())
-                ):
-
-                    for _, row in pd.DataFrame(rows).iterrows():
-
-                        with st.expander(f"📘 {row['Заголовок']}"):
-
-                            st.markdown(
-                                highlight_text(
-                                    str(row["Текст инструкции"]),
-                                    search_query
-                                ),
-                                unsafe_allow_html=True
-                            )
+            with st.expander(
+                str(row["Заголовок"]),
+                expanded=bool(search_query.strip())
+            ):
+                st.caption("Текст инструкции")
+                st.markdown(
+                    highlight_text(
+                        str(row["Текст инструкции"]),
+                        search_query
+                    ),
+                    unsafe_allow_html=True
+                )
+                metadata = []
+                if str(row.get("Дата обновления", "")).strip():
+                    metadata.append(f"Обновлено: {row['Дата обновления']}")
+                if str(row.get("Источник", "")).strip():
+                    metadata.append(f"Источник: {row['Источник']}")
+                if metadata:
+                    st.caption(" | ".join(metadata))
 
     elif search_query.strip():
         st.info("По вашему запросу ничего не найдено.")
