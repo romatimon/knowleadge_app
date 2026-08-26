@@ -71,7 +71,7 @@ if "db" not in st.session_state or not st.session_state.db:
         raw = {}
         
     st.session_state.db = {}
-    table_keys = ["faq", "contacts_experts", "contacts_labs", "testing_battery", "texts_table"]
+    table_keys = ["faq", "contacts_experts", "contacts_labs", "testing_battery", "texts_table", "samples_nd"]
     
     for key in table_keys:
         saved_data = raw.get(key)
@@ -99,17 +99,25 @@ if "db" not in st.session_state or not st.session_state.db:
                 st.session_state.db[key] = pd.DataFrame(columns=["Регламент", "Название", "ДС (серия)", "ДС (партия)", "СС (серия)", "СС (партия)"])
             elif key == "testing_battery":
                 st.session_state.db[key] = pd.DataFrame(columns=["Наименование продукции",	"Ограничения при проведении испытаний",	"Максимальный срок проведения испытаний",	"Необходимое кол-во образцов"])
+            elif key == "samples_nd":
+                st.session_state.db[key] = pd.DataFrame(columns=[
+                    "ТР ТС/ЕАЭС и/или сочетание",
+                    "Группа (вид) продукции",
+                    "Кол-во образцов (партия)",
+                    "Кол-во образцов (серийный выпуск)",
+                    "ГОСТ на отбор"
+                ])
 
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
 # ===== 3. БОКОВАЯ ПАНЕЛЬ ДЛЯ ВХОДА АДМИНА =====
 with st.sidebar:
-    st.header("🔑 Доступ к редактированию")
+    st.header("Вход для администратора")
     if not st.session_state.is_admin:
         u = st.text_input("Логин", key="u_reg")
         p = st.text_input("Пароль", type="password", key="p_reg")
-        if st.button("Войти как admin", width="stretch"):
+        if st.button("Войти", width="stretch"):
             if u in ADMIN_USERS and ADMIN_USERS[u] == p:
                 st.session_state.is_admin = True
                 st.rerun()
@@ -186,6 +194,7 @@ experts_filtered = search_df(st.session_state.db["contacts_experts"], search_que
 labs_filtered = search_df(st.session_state.db["contacts_labs"], search_query)
 texts_filtered = search_df(st.session_state.db["texts_table"], search_query)
 battary_filtred = search_df(st.session_state.db["testing_battery"], search_query)
+samples_nd_filtered = search_df(st.session_state.db["samples_nd"], search_query)
 faq_filtered = search_df(
     st.session_state.db["faq"],
     search_query
@@ -194,7 +203,7 @@ faq_filtered = search_df(
 
 # Названия вкладок строго статичны
 tab1_title = "❓ Типовые ситуации (FAQ)"
-tab5_title = "📊 Сроки испытаний и РД"
+tab5_title = "📊 Нормы и сроки: отбор, испытания, РД"
 tab4_title = "📝 Инструкции и алгоритмы"
 
 # Создаем вкладки со строгим фиксированным ключом сессии
@@ -381,8 +390,6 @@ with tab5:
 **Обозначения**
 - **«—»** — такой тип документа не применяется для данного регламента
 - **«бессрочно»** — документ не имеет ограничения по сроку действия
-- **ДС** — декларация о соответствии
-- **СС** — сертификат соответствия
 
 **Особенности**
 - Для **007/2011** срок зависит от схемы и группы продукции
@@ -390,18 +397,29 @@ with tab5:
 - Для **032/2013** (7с) срок определяется назначенным сроком службы или ресурса
 
 ⚠️ Важно
-- Указаны максимально возможные сроки действия документов.
+- Указаны максимально возможные сроки действия документов
 - Фактический срок может быть меньше в зависимости от схемы подтверждения соответствия
+
+___
 
 **ГОСТ Р (ПП РФ 2425)**
 
-**Сертификаты**
-- Серийный выпуск — не более 5 лет
-- Партия — 1 год либо срок службы, но не более 5 лет
+**Сертификаты:**
 
-**Декларации**
-- Серийный выпуск — не более 5 лет
-- Партия — 1 год либо срок службы, но не более 5 лет
+Серия: для серийно выпускаемой продукции — не более 5 лет (если иное не установлено в национальном стандарте, определяющем правила сертификации)
+
+Партия:
+1. срок годности или срок службы не установлен → **1 год**
+2. срок годности или срок службы установлен → **на срок годности (службы), но не более 5 лет**
+
+
+**Декларации:**
+
+Серия: для серийно выпускаемой продукции — не более 5 лет (если иное не установлено в национальном стандарте, определяющем правила декларирования)
+
+Партия:
+1. срок годности или срок службы не установлен → **1 год**
+2. срок годности или срок службы установлен → на срок годности (службы), но не более 5 лет
 """)
 
             render_table_view("contacts_labs", labs_filtered, row_height=80)
@@ -438,12 +456,32 @@ with tab5:
                 row_height=80
             )
 
+    # ===== НОРМЫ ОТБОРА ОБРАЗЦОВ =====
+    if not samples_nd_filtered.empty or not search_query.strip():
+
+        with st.expander(
+            "🧪 Нормы отбора образцов по пищевой продукции/кормам",
+            expanded=bool(search_query.strip())
+        ):
+
+            st.info("""
+    💡 **Справочная информация о нормах отбора проб для пищевой, молочной, мясной, рыбной, табачной, никотинсодержащей продукции, кормов, пищевых добавок и других товаров.
+    Для каждого вида продукции приведены нормы для контроля партии и серийного выпуска**
+    """)
+
+            render_table_view(
+                "samples_nd",
+                samples_nd_filtered,
+                row_height=80
+            )
+
     # Если ничего не найдено
     if (
         search_query.strip()
         and experts_filtered.empty
         and labs_filtered.empty
         and battary_filtred.empty
+        and samples_nd_filtered.empty
     ):
         st.info("По вашему запросу ничего не найдено.")
 
