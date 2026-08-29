@@ -1,10 +1,14 @@
 .git
+.env
 .venv
 venv
 __pycache__
 *.pyc
 *.pyo
+*.json
+*.db
 .pytest_cache
 .mypy_cache
 .vscode
 backups
+

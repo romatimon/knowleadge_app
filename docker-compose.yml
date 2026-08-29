@@ -5,8 +5,12 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      # Монтируем ВСЮ папку проекта
-      - .:/app
+      - ./knowledge.db:/data/knowledge.db
+      - ./database.json:/data/database.json:ro
+      - ./backups:/data/backups
     restart: unless-stopped
     environment:
-      - TZ=Europe/Moscow
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      DATA_DIR: /data
+      TZ: Europe/Moscow
+

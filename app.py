@@ -1,3 +1,5 @@
+import hmac
+import html
 import json
 import os
 import re
@@ -12,10 +14,12 @@ import streamlit as st
 # Настройка конфигурации страницы
 st.set_page_config(page_title="База знаний менеджера", layout="wide")
 
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "secret123")
 BASE_DIR = Path(__file__).resolve().parent
-JSON_PATH = BASE_DIR / "database.json"
-SQLITE_PATH = BASE_DIR / "knowledge.db"
+DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR)))
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+JSON_PATH = DATA_DIR / "database.json"
+SQLITE_PATH = DATA_DIR / "knowledge.db"
+BACKUP_DIR = DATA_DIR / "backups"
 TABLE_KEYS = [
     "faq",
     "contacts_experts",
@@ -33,10 +37,11 @@ MATERIAL_METADATA = {
 def save_all_data(data):
     """Сохраняет таблицы в SQLite и делает резервную копию базы."""
     if SQLITE_PATH.exists():
-        os.makedirs("backups", exist_ok=True)
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         backup_name = datetime.now(UTC).strftime("knowledge_%Y%m%d_%H%M%S_%f.db")
-        shutil.copy2(SQLITE_PATH, Path("backups") / backup_name)
+        shutil.copy2(SQLITE_PATH, BACKUP_DIR / backup_name)
 
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(SQLITE_PATH) as connection:
         for table_name, table_data in data.items():
             frame = table_data if isinstance(table_data, pd.DataFrame) else pd.DataFrame(table_data)
@@ -120,11 +125,12 @@ def ensure_material_columns(frame, table_name):
 
 def highlight_text(text, query):
     """Подсветка найденного слова в тексте с помощью HTML-тега <mark>"""
+    safe_text = html.escape(str(text))
     if not query.strip():
-        return text
-    safe_query = re.escape(query.strip())
+        return safe_text
+    safe_query = re.escape(html.escape(query.strip()))
     compiled = re.compile(f"({safe_query})", re.IGNORECASE)
-    return compiled.sub(r"<mark style='background-color: #ffeb3b; color: black; padding: 2px 4px; border-radius: 3px;'>\1</mark>", text)
+    return compiled.sub(r"<mark style='background-color: #ffeb3b; color: black; padding: 2px 4px; border-radius: 3px;'>\1</mark>", safe_text)
 
 # ===== 2. УНИВЕРСАЛЬНАЯ ИНИЦИАЛИЗАЦИЯ СЕССИИ =====
 if "db" not in st.session_state or not st.session_state.db:
@@ -182,11 +188,13 @@ if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
 with st.sidebar:
-    if not st.session_state.is_admin:
+    if not ADMIN_PASSWORD:
+        st.warning("Режим администратора недоступен: переменная ADMIN_PASSWORD не настроена.")
+    elif not st.session_state.is_admin:
         st.header("Вход администратора")
         p = st.text_input("Пароль", type="password", key="admin_password")
         if st.button("Войти", width="stretch"):
-            if p == ADMIN_PASSWORD:
+            if hmac.compare_digest(p, ADMIN_PASSWORD):
                 st.session_state.is_admin = True
                 st.rerun()
             else:
@@ -810,3 +818,4 @@ with tab4:
 
     elif search_query.strip():
         st.info("По вашему запросу ничего не найдено.")
+
