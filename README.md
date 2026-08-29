@@ -189,20 +189,45 @@ streamlit run app.py
 http://localhost:8501
 ```
 
-## Запуск через Docker
+## Сборка Docker-образа
 
-Перед первым запуском в каталоге проекта должны находиться:
-
-```text
-knowledge.db
-database.json
-backups/
-```
-
-Создайте `.env` и запустите приложение:
+Соберите образ без рабочих данных и отправьте его в registry:
 
 ```bash
-docker compose up -d --build
+docker build -t rtimonin569/knowledge_app:latest .
+docker push rtimonin569/knowledge_app:latest
+```
+
+Файлы `.env`, `database.json`, `knowledge.db` и каталог `backups/` исключены из контекста сборки и не попадают в образ.
+
+## Развёртывание через Portainer
+
+Перед первым запуском на сервере должны находиться:
+
+```text
+/home/roman/knowledge_app/knowledge.db
+/home/roman/knowledge_app/database.json
+/home/roman/knowledge_app/backups/
+```
+
+Создайте Stack из `docker-compose.yml` и добавьте переменные окружения:
+
+```text
+ADMIN_PASSWORD=<надежный пароль администратора>
+IMAGE_TAG=latest
+HOST_DATA_DIR=/home/roman/knowledge_app
+```
+
+`ADMIN_PASSWORD` хранится только в настройках Stack. Не добавляйте реальный пароль в Compose-файл, GitHub или Docker-образ.
+
+При обновлении опубликуйте новый образ, затем выполните **Pull and redeploy** в Portainer. Рабочая база и резервные копии останутся на сервере благодаря bind mounts.
+
+## Запуск Compose на сервере
+
+При необходимости тот же Compose-файл можно запустить без Portainer. Создайте `.env` на основе `.env.example`, затем выполните:
+
+```bash
+docker compose up -d
 ```
 
 Посмотреть журналы:
@@ -217,13 +242,7 @@ docker compose logs -f knowledge-app
 docker compose down
 ```
 
-При обновлении исходного кода образ необходимо пересобрать. Рабочая база и резервные копии при этом сохраняются на сервере.
-
-## Развёртывание через Portainer
-
-Для запуска через Portainer передайте `ADMIN_PASSWORD` в разделе переменных окружения Stack и используйте `docker-compose.yml` из репозитория.
-
-Корпоративные данные должны находиться на сервере рядом с Compose-файлом и подключаться к контейнеру через указанные bind mounts. Не добавляйте базу знаний в GitHub или публичный Docker registry.
+Корпоративные данные подключаются к контейнеру отдельно. Не добавляйте базу знаний в GitHub или публичный Docker registry.
 
 ## Статус проекта
 
@@ -246,4 +265,3 @@ docker compose down
 Python Backend Developer / Automation Engineer
 
 GitHub: [@romatimon](https://github.com/romatimon)
-
