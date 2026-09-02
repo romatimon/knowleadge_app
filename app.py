@@ -1,82 +1,53 @@
 import hmac
 import html
-import json
 import os
 import re
-import shutil
-import sqlite3
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+from storage import TABLE_KEYS, load_all_data, save_all_data
+
 # Настройка конфигурации страницы
 st.set_page_config(page_title="База знаний менеджера", layout="wide")
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR)))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
-JSON_PATH = DATA_DIR / "database.json"
-SQLITE_PATH = DATA_DIR / "knowledge.db"
-BACKUP_DIR = DATA_DIR / "backups"
-TABLE_KEYS = [
-    "faq",
-    "contacts_experts",
-    "contacts_labs",
-    "testing_battery",
-    "texts_table",
-    "samples_nd",
-]
 MATERIAL_METADATA = {
-    "faq": ["Алгоритм", "Дата обновления", "Источник"],
-    "texts_table": ["Дата обновления", "Источник"],
+    "faq": ["Алгоритм", "Поисковые фразы", "Дата обновления", "Источник"],
+    "texts_table": [
+        "Краткое описание",
+        "Поисковые фразы",
+        "Дата обновления",
+        "Источник",
+    ],
 }
 
-# ===== 1. ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ =====
-def save_all_data(data):
-    """Сохраняет таблицы в SQLite и делает резервную копию базы."""
-    if SQLITE_PATH.exists():
-        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        backup_name = datetime.now(UTC).strftime("knowledge_%Y%m%d_%H%M%S_%f.db")
-        shutil.copy2(SQLITE_PATH, BACKUP_DIR / backup_name)
+INSTRUCTION_TEMPLATE = """## Назначение
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(SQLITE_PATH) as connection:
-        for table_name, table_data in data.items():
-            frame = table_data if isinstance(table_data, pd.DataFrame) else pd.DataFrame(table_data)
-            if frame.empty and not frame.columns.tolist():
-                continue
-            frame.to_sql(table_name, connection, if_exists="replace", index=False)
+Кратко опишите, что сотрудник сделает с помощью инструкции.
 
-def load_all_data():
-    """Загружает данные из SQLite или мигрирует их из JSON."""
-    if SQLITE_PATH.exists():
-        with sqlite3.connect(SQLITE_PATH) as connection:
-            tables = pd.read_sql_query(
-                "SELECT name FROM sqlite_master WHERE type='table'",
-                connection,
-            )["name"].tolist()
-            existing_tables = [table_name for table_name in TABLE_KEYS if table_name in tables]
-            if existing_tables:
-                return {
-                    table_name: pd.read_sql_query(
-                        f'SELECT * FROM "{table_name}"', connection
-                    ).to_dict(orient="records")
-                    for table_name in existing_tables
-                }
+## Когда применять
 
-    if JSON_PATH.exists():
-        try:
-            with JSON_PATH.open("r", encoding="utf-8") as file:
-                data = json.load(file)
-            if isinstance(data, dict):
-                save_all_data(data)
-                return data
-        except json.JSONDecodeError:
-            pass
+- Укажите условия применения.
 
-    return {}
+## Что подготовить
+
+- Перечислите документы и сведения.
+
+## Алгоритм
+
+1. Выполнить первое действие.
+2. Выполнить следующее действие.
+
+## Особые случаи
+
+- Если возникает исключение, укажите отдельное действие.
+
+## Результат
+
+Опишите, как понять, что работа завершена.
+"""
 
 def normalize(text):
     """Нормализация текста для поиска"""
@@ -124,12 +95,19 @@ def ensure_material_columns(frame, table_name):
     return frame
 
 def highlight_text(text, query):
-    """Подсветка найденного слова в тексте с помощью HTML-тега <mark>"""
+    """Подсвечивает отдельные слова запроса в безопасном HTML."""
     safe_text = html.escape(str(text))
     if not query.strip():
         return safe_text
-    safe_query = re.escape(html.escape(query.strip()))
-    compiled = re.compile(f"({safe_query})", re.IGNORECASE)
+
+    terms = list(dict.fromkeys(re.findall(r"[^\W_]+", query, flags=re.UNICODE)))
+    if not terms:
+        return safe_text
+    pattern = "|".join(
+        re.escape(html.escape(term))
+        for term in sorted(terms, key=len, reverse=True)
+    )
+    compiled = re.compile(f"({pattern})", re.IGNORECASE)
     return compiled.sub(r"<mark style='background-color: #ffeb3b; color: black; padding: 2px 4px; border-radius: 3px;'>\1</mark>", safe_text)
 
 # ===== 2. УНИВЕРСАЛЬНАЯ ИНИЦИАЛИЗАЦИЯ СЕССИИ =====
@@ -150,7 +128,14 @@ if "db" not in st.session_state or not st.session_state.db:
         else:
             if key == "texts_table":
                 st.session_state.db[key] = pd.DataFrame(
-                    columns=["Заголовок", "Текст инструкции", "Дата обновления", "Источник"]
+                    columns=[
+                        "Заголовок",
+                        "Краткое описание",
+                        "Текст инструкции",
+                        "Поисковые фразы",
+                        "Дата обновления",
+                        "Источник",
+                    ]
                 )
             elif key == "faq":
                 st.session_state.db[key] = pd.DataFrame(columns=[
@@ -159,6 +144,7 @@ if "db" not in st.session_state or not st.session_state.db:
                     "Ответ",
                     "Алгоритм",
                     "Важно",
+                    "Поисковые фразы",
                     "Дата обновления",
                     "Источник",
                 ])
@@ -439,6 +425,13 @@ def render_faq_editor():
             "Важно",
             value=str(row.get("Важно", "")),
             height=120,
+            placeholder="Ограничения, риски и исключения",
+        )
+        search_phrases = st.text_area(
+            "Ключевые слова для поиска",
+            value=str(row.get("Поисковые фразы", "")),
+            height=80,
+            placeholder="Синонимы и формулировки сотрудников через точку с запятой",
         )
         updated_at = st.date_input(
             "Дата обновления",
@@ -462,6 +455,7 @@ def render_faq_editor():
                 "Ответ": answer,
                 "Алгоритм": algorithm,
                 "Важно": important,
+                "Поисковые фразы": search_phrases,
                 "Дата обновления": updated_at.isoformat(),
                 "Источник": source,
             }
@@ -500,10 +494,26 @@ def render_text_editor():
 
     with st.form(form_key):
         title = st.text_input("Заголовок", value=str(row.get("Заголовок", "")))
+        summary = st.text_area(
+            "Краткое описание",
+            value=str(row.get("Краткое описание", "")),
+            height=90,
+            placeholder="Что сотрудник получит после выполнения инструкции",
+        )
         instruction = st.text_area(
             "Текст инструкции",
-            value=str(row.get("Текст инструкции", "")),
-            height=360,
+            value=(
+                str(row.get("Текст инструкции", ""))
+                if selected_index is not None
+                else INSTRUCTION_TEMPLATE
+            ),
+            height=480,
+        )
+        search_phrases = st.text_area(
+            "Ключевые слова для поиска",
+            value=str(row.get("Поисковые фразы", "")),
+            height=80,
+            placeholder="Синонимы, сокращения и альтернативные запросы",
         )
         updated_at = st.date_input(
             "Дата обновления",
@@ -523,7 +533,9 @@ def render_text_editor():
         else:
             values = {
                 "Заголовок": title,
+                "Краткое описание": summary,
                 "Текст инструкции": instruction,
+                "Поисковые фразы": search_phrases,
                 "Дата обновления": updated_at.isoformat(),
                 "Источник": source,
             }
@@ -800,6 +812,16 @@ with tab4:
                 str(row["Заголовок"]),
                 expanded=bool(search_query.strip())
             ):
+                if str(row.get("Краткое описание", "")).strip():
+                    st.caption("Коротко")
+                    st.markdown(
+                        highlight_text(
+                            str(row["Краткое описание"]),
+                            search_query,
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                    st.divider()
                 st.caption("Текст инструкции")
                 st.markdown(
                     highlight_text(
