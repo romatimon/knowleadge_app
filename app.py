@@ -49,6 +49,15 @@ INSTRUCTION_TEMPLATE = """## Назначение
 Опишите, как понять, что работа завершена.
 """
 
+
+def passwords_match(candidate, expected):
+    """Безопасно сравнивает пароли, включая кириллицу и другие Unicode-символы."""
+    return hmac.compare_digest(
+        candidate.encode("utf-8"),
+        expected.encode("utf-8"),
+    )
+
+
 def normalize(text):
     """Нормализация текста для поиска"""
     return (
@@ -180,7 +189,7 @@ with st.sidebar:
         st.header("Вход администратора")
         p = st.text_input("Пароль", type="password", key="admin_password")
         if st.button("Войти", width="stretch"):
-            if hmac.compare_digest(p, ADMIN_PASSWORD):
+            if passwords_match(p, ADMIN_PASSWORD):
                 st.session_state.is_admin = True
                 st.rerun()
             else:
