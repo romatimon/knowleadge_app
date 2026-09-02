@@ -101,8 +101,8 @@ knowleadge_app/
 ├── .env.example           # пример конфигурации
 ├── requirements.txt       # зависимости для Docker и pip
 ├── Dockerfile
-├── docker-compose.yml     # локальная сборка и запуск
-└── compose.production.yml # запуск опубликованного образа на сервере
+├── compose.local.yml      # локальная сборка и запуск
+└── docker-compose.yml     # опубликованный образ на сервере и в Portainer
 ```
 
 ## Хранение данных
@@ -155,7 +155,7 @@ cd knowleadge_app
 запустите проект из Git Bash:
 
 ```bash
-docker compose up -d --build
+docker compose -f compose.local.yml up -d --build
 ```
 
 Приложение будет доступно по адресу:
@@ -167,19 +167,20 @@ http://localhost:8502
 Посмотреть состояние и журналы:
 
 ```bash
-docker compose ps
-docker compose logs -f knowledge-app
+docker compose -f compose.local.yml ps
+docker compose -f compose.local.yml logs -f knowledge-app
 ```
 
 Остановить приложение:
 
 ```bash
-docker compose down
+docker compose -f compose.local.yml down
 ```
 
-После изменения кода снова выполните `docker compose up -d --build`. Локальный
-Compose собирает образ `knowledge-app:local` из текущих файлов и не загружает
-рабочий образ с сервера.
+После изменения кода снова выполните
+`docker compose -f compose.local.yml up -d --build`. Локальный Compose собирает
+образ `knowledge-app:local` из текущих файлов и не загружает рабочий образ с
+сервера.
 
 ## Локальный запуск без Docker
 
@@ -224,7 +225,7 @@ docker push rtimonin569/knowledge_app:$VERSION
 /home/roman/knowledge_app/backups/
 ```
 
-Создайте Stack из `compose.production.yml` и добавьте переменные окружения:
+Создайте Stack из `docker-compose.yml` и добавьте переменные окружения:
 
 ```text
 ADMIN_PASSWORD=<надежный пароль администратора>
@@ -244,20 +245,20 @@ HOST_DATA_DIR=/home/roman/knowledge_app
 на сервере `.env` на основе `.env.example`, затем выполните:
 
 ```bash
-docker compose -f compose.production.yml pull
-docker compose -f compose.production.yml up -d
+docker compose pull
+docker compose up -d
 ```
 
 Посмотреть журналы:
 
 ```bash
-docker compose -f compose.production.yml logs -f knowledge-app
+docker compose logs -f knowledge-app
 ```
 
 Остановить приложение:
 
 ```bash
-docker compose -f compose.production.yml down
+docker compose down
 ```
 
 Корпоративные данные подключаются к контейнеру отдельно. Не добавляйте базу знаний в GitHub или публичный Docker registry.

@@ -1,0 +1,16 @@
+services:
+  knowledge-app:
+    build:
+      context: .
+    image: knowledge-app:local
+    container_name: knowledge-base-app-local
+    ports:
+      - "8502:8501"
+    volumes:
+      - ./knowledge.db:/data/knowledge.db
+      - ./backups:/data/backups
+    restart: unless-stopped
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      DATA_DIR: /data
+      TZ: Europe/Moscow
