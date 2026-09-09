@@ -213,7 +213,16 @@ def _render_settings_form(
                 "Подтверждаю удаление данных из исключённых колонок",
                 disabled=not selected_id,
             )
-            body = ""
+            body = st.text_area(
+                "Памятка к таблице",
+                value=str(selected.get("body", "")),
+                height=220,
+                placeholder=(
+                    "Необязательный текст над таблицей: пояснения, правила, "
+                    "единицы измерения или важные исключения"
+                ),
+                help="Можно использовать Markdown: заголовки, списки и выделение.",
+            )
         else:
             default_body = (
                 INSTRUCTION_TEMPLATE
