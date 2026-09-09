@@ -707,7 +707,36 @@ def _render_delete_action(selected_id: str) -> None:
 
 def _render_active_editor(sections: list[dict], active_items: list[dict]) -> None:
     section_by_id = {section["id"]: section for section in sections}
-    item_by_id = {item["id"]: item for item in active_items}
+    section_ids = list(section_by_id)
+    type_ids = list(TYPE_LABELS)
+
+    section_filter_col, type_filter_col = st.columns(2)
+    with section_filter_col:
+        section_filter = st.selectbox(
+            "Фильтр: раздел",
+            [""] + section_ids,
+            format_func=lambda value: (
+                "Все разделы" if not value else section_by_id[value]["title"]
+            ),
+            key="material_admin_section_filter",
+        )
+    with type_filter_col:
+        type_filter = st.selectbox(
+            "Фильтр: тип",
+            [""] + type_ids,
+            format_func=lambda value: (
+                "Все типы" if not value else TYPE_LABELS[value]
+            ),
+            key="material_admin_type_filter",
+        )
+
+    filtered_items = [
+        item
+        for item in active_items
+        if (not section_filter or item.get("section_id") == section_filter)
+        and (not type_filter or item.get("item_type") == type_filter)
+    ]
+    item_by_id = {item["id"]: item for item in filtered_items}
     options = [""] + list(item_by_id)
     selected_id = st.selectbox(
         "Материал для редактирования",
@@ -717,12 +746,16 @@ def _render_active_editor(sections: list[dict], active_items: list[dict]) -> Non
             if not value
             else _item_label(item_by_id[value], section_by_id)
         ),
-        key="material_admin_select",
+        key=(
+            f"material_admin_select_{section_filter or 'all'}_"
+            f"{type_filter or 'all'}"
+        ),
     )
     selected = item_by_id.get(selected_id, {})
+    if not selected_id and section_filter:
+        selected = {"section_id": section_filter}
 
-    type_ids = list(TYPE_LABELS)
-    selected_type = selected.get("item_type", "article")
+    selected_type = selected.get("item_type", type_filter or "article")
     item_type = st.selectbox(
         "Тип материала",
         type_ids,

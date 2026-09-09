@@ -17,6 +17,7 @@ st.set_page_config(page_title="База знаний менеджера", layout
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 DYNAMIC_TABLE_ROW_HEIGHT = 80
+DYNAMIC_TABLE_VISIBLE_ROWS = 20
 
 
 def passwords_match(candidate, expected):
@@ -171,6 +172,15 @@ def render_section_materials(section_id, search_query):
                 if frame.empty:
                     st.caption("Таблица пока не заполнена.")
                 else:
+                    table_height = (
+                        "content"
+                        if len(frame) <= DYNAMIC_TABLE_VISIBLE_ROWS
+                        else (
+                            DYNAMIC_TABLE_VISIBLE_ROWS
+                            * DYNAMIC_TABLE_ROW_HEIGHT
+                            + 40
+                        )
+                    )
                     table_config = {
                         column["label"]: st.column_config.TextColumn(
                             column["label"],
@@ -187,7 +197,7 @@ def render_section_materials(section_id, search_query):
                         frame.fillna(""),
                         row_height=DYNAMIC_TABLE_ROW_HEIGHT,
                         width="stretch",
-                        height="auto",
+                        height=table_height,
                         hide_index=True,
                         column_config=table_config,
                     )
