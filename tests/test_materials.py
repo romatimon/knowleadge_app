@@ -1,0 +1,176 @@
+import tempfile
+import unittest
+from io import BytesIO
+from pathlib import Path
+from unittest.mock import patch
+
+import pandas as pd
+import storage
+from knowledge_base.materials import (
+    _columns_frame,
+    _display_table_frame,
+    _excel_bytes,
+    _map_import_rows,
+    _parse_columns_editor,
+    _read_table_file,
+)
+from streamlit.testing.v1 import AppTest
+
+
+def render_materials_test_page():
+    from knowledge_base.materials import render_materials_admin
+
+    render_materials_admin()
+
+
+class MaterialTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        data_dir = Path(self.temp_dir.name)
+        self.patches = [
+            patch.object(storage, "DATA_DIR", data_dir),
+            patch.object(storage, "SQLITE_PATH", data_dir / "knowledge.db"),
+            patch.object(storage, "BACKUP_DIR", data_dir / "backups"),
+        ]
+        for active_patch in self.patches:
+            active_patch.start()
+
+    def tearDown(self):
+        for active_patch in reversed(self.patches):
+            active_patch.stop()
+        self.temp_dir.cleanup()
+
+    def test_table_round_trip_and_archive(self):
+        item = {
+            "id": "sampling-table",
+            "section_id": "reference_tables",
+            "item_type": "table",
+            "title": "Нормы отбора",
+            "summary": "Количество образцов",
+            "body": "",
+            "keywords": "образцы; партия",
+            "source": "Регламент",
+            "updated_at": "2026-09-09",
+            "position": 10,
+            "is_visible": True,
+            "is_archived": False,
+            "table_columns": ["Продукция", "Количество"],
+            "table_rows": [{"Продукция": "Молоко", "Количество": "5"}],
+        }
+        storage.save_content_item(item)
+
+        loaded = storage.load_content_items(section_id="reference_tables")
+        columns = loaded[0]["table_columns"]
+        self.assertEqual(
+            [column["label"] for column in columns], item["table_columns"]
+        )
+        self.assertEqual(
+            loaded[0]["table_rows"][0][columns[0]["id"]], "Молоко"
+        )
+
+        storage.archive_content_item(item["id"])
+        self.assertEqual(storage.load_content_items(), [])
+        storage.restore_content_item(item["id"])
+        self.assertEqual(len(storage.load_content_items()), 1)
+
+    def test_admin_can_create_and_open_empty_table(self):
+        storage.save_content_item(
+            {
+                "id": "empty-table",
+                "section_id": "reference_tables",
+                "item_type": "table",
+                "title": "Новая таблица",
+                "table_columns": ["Продукция", "Срок"],
+                "table_rows": [],
+            }
+        )
+        page = AppTest.from_function(render_materials_test_page).run(timeout=30)
+        table_id = storage.load_content_items()[0]["id"]
+        material_selector = next(
+            item
+            for item in page.selectbox
+            if item.label == "Материал для редактирования"
+        )
+        material_selector.select(table_id)
+        page.run(timeout=30)
+
+        self.assertEqual(list(page.exception), [])
+        saved_table = storage.load_content_items()[0]
+        self.assertEqual(
+            [column["label"] for column in saved_table["table_columns"]],
+            ["Продукция", "Срок"],
+        )
+
+    def test_column_rename_keeps_id_and_values(self):
+        storage.save_content_item(
+            {
+                "id": "rename-table",
+                "section_id": "reference_tables",
+                "item_type": "table",
+                "title": "Проверка переименования",
+                "table_columns": ["Продукция"],
+                "table_rows": [{"Продукция": "Молоко"}],
+            }
+        )
+        item = storage.load_content_items()[0]
+        column_id = item["table_columns"][0]["id"]
+        frame = _columns_frame(item["table_columns"])
+        frame.loc[0, "Название"] = "Наименование продукции"
+        columns, error = _parse_columns_editor(frame)
+        self.assertIsNone(error)
+
+        item["table_columns"] = columns
+        storage.save_content_item(item)
+        renamed = storage.load_content_items()[0]
+
+        self.assertEqual(renamed["table_columns"][0]["id"], column_id)
+        self.assertEqual(renamed["table_rows"][0][column_id], "Молоко")
+
+    def test_csv_import_supports_semicolon_and_cp1251(self):
+        content = "Продукция;Количество\nМолоко;5\n".encode("cp1251")
+
+        frame = _read_table_file("samples.csv", content)
+
+        self.assertEqual(
+            frame.to_dict(orient="records"),
+            [{"Продукция": "Молоко", "Количество": "5"}],
+        )
+
+    def test_import_mapping_and_excel_export(self):
+        columns = [
+            {
+                "id": "product-id",
+                "label": "Продукция",
+                "type": "text",
+                "required": True,
+                "position": 10,
+            },
+            {
+                "id": "amount-id",
+                "label": "Количество",
+                "type": "number",
+                "required": False,
+                "position": 20,
+            },
+        ]
+        source = pd.DataFrame([{"Товар": "Молоко", "Кол-во": 5}])
+        rows = _map_import_rows(
+            source,
+            columns,
+            {"product-id": "Товар", "amount-id": "Кол-во"},
+        )
+        item = {"table_columns": columns, "table_rows": rows}
+
+        exported = _display_table_frame(item)
+        excel_content = _excel_bytes(exported)
+        imported = pd.read_excel(BytesIO(excel_content), dtype=str)
+
+        self.assertEqual(rows, [{"product-id": "Молоко", "amount-id": "5"}])
+        self.assertEqual(imported.iloc[0].to_dict(), {
+            "Продукция": "Молоко",
+            "Количество": "5",
+        })
+
+
+if __name__ == "__main__":
+    unittest.main()

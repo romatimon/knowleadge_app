@@ -3,11 +3,20 @@ import html
 import os
 import re
 from datetime import UTC, datetime
+from functools import partial
 
 import pandas as pd
 import streamlit as st
 
-from storage import TABLE_KEYS, load_all_data, save_all_data
+from knowledge_base.sections import render_sections_admin
+from knowledge_base.materials import render_materials_admin
+from storage import (
+    TABLE_KEYS,
+    load_all_data,
+    load_content_items,
+    load_sections,
+    save_all_data,
+)
 
 # Настройка конфигурации страницы
 st.set_page_config(page_title="База знаний менеджера", layout="wide")
@@ -200,9 +209,7 @@ with st.sidebar:
             st.session_state.is_admin = False
             st.rerun()
 
-# ===== 4. ОСНОВНОЙ ИНТЕРФЕЙС И ГЛОБАЛЬНЫЙ ПОИСК =====
-st.title("📚 Единая база знаний для менеджеров")
-
+# ===== 4. ОБЩИЙ СТИЛЬ СТРАНИЦ =====
 st.markdown(
     """
     <style>
@@ -253,41 +260,117 @@ def clear_search():
     """Очищает поле поиска"""
     st.session_state.search_input_key = ""
 
-# Разделяем строку: 6 частей под поиск, 1 часть под кнопку сброса
-col_search, col_clear = st.columns([6, 1])
+def render_section_header(section):
+    """Показывает заголовок раздела и единое поле поиска."""
+    icon = str(section.get("icon", "")).strip()
+    title = str(section.get("title", "")).strip()
+    st.title(f"{icon} {title}".strip())
+    if str(section.get("description", "")).strip():
+        st.caption(str(section["description"]))
 
-with col_search:
-    search_query = st.text_input(
-        "Поиск по всей базе знаний", 
-        placeholder="Введите ключевое слово (например: МЧД, 007/2011, ДС 353)...",
-        key="search_input_key"
-    )
-    st.caption("Поиск выполняется по материалам выбранной вкладки.")
-
-with col_clear:
-    st.markdown("<div style='padding-top: 28px;'></div>", unsafe_allow_html=True)
-    if st.button("Сбросить", width="stretch", on_click=clear_search):
-        st.rerun()
-
-# Подготовка отфильтрованных данных
-experts_filtered = search_df(st.session_state.db["contacts_experts"], search_query)
-labs_filtered = search_df(st.session_state.db["contacts_labs"], search_query)
-texts_filtered = search_df(st.session_state.db["texts_table"], search_query)
-battary_filtred = search_df(st.session_state.db["testing_battery"], search_query)
-samples_nd_filtered = search_df(st.session_state.db["samples_nd"], search_query)
-faq_filtered = search_df(
-    st.session_state.db["faq"],
-    search_query
-)
+    col_search, col_clear = st.columns([6, 1])
+    with col_search:
+        query = st.text_input(
+            "Поиск в разделе",
+            placeholder="Например: МЧД, 007/2011, ДС 353...",
+            key="search_input_key",
+        )
+    with col_clear:
+        st.markdown("<div style='padding-top: 28px;'></div>", unsafe_allow_html=True)
+        st.button("Сбросить", width="stretch", on_click=clear_search)
+    return query
 
 
-# Названия вкладок строго статичны
-tab1_title = "❓ Типовые ситуации (FAQ)"
-tab5_title = "📊 Нормы и сроки: отбор, испытания, РД"
-tab4_title = "📝 Инструкции и алгоритмы"
+def render_section_materials(section_id, search_query):
+    """Показывает опубликованные универсальные материалы выбранного раздела."""
+    items = [
+        item
+        for item in load_content_items(section_id=section_id)
+        if item.get("is_visible", True)
+    ]
+    terms = normalize(search_query).split()
 
-# Создаем вкладки со строгим фиксированным ключом сессии
-tab1, tab5, tab4 = st.tabs([tab1_title, tab5_title, tab4_title], key='fixed_main_tabs')
+    def matches(item):
+        if not terms:
+            return True
+        table_text = " ".join(
+            str(value)
+            for row in item.get("table_rows", [])
+            for value in row.values()
+        )
+        haystack = normalize(
+            " ".join(
+                [
+                    str(item.get("title", "")),
+                    str(item.get("summary", "")),
+                    str(item.get("body", "")),
+                    str(item.get("keywords", "")),
+                    str(item.get("source", "")),
+                    " ".join(
+                        str(column.get("label", ""))
+                        for column in item.get("table_columns", [])
+                    ),
+                    table_text,
+                ]
+            )
+        )
+        return all(term in haystack for term in terms)
+
+    filtered_items = [item for item in items if matches(item)]
+    if not filtered_items:
+        return False
+
+    st.subheader("Материалы раздела")
+    type_icons = {"article": "📄", "instruction": "🧭", "table": "📊"}
+    for item in filtered_items:
+        icon = type_icons.get(item.get("item_type"), "📄")
+        with st.expander(
+            f"{icon} {item['title']}",
+            expanded=bool(search_query.strip()),
+        ):
+            if str(item.get("summary", "")).strip():
+                st.info(str(item["summary"]))
+
+            if item.get("item_type") == "table":
+                columns = item.get("table_columns", [])
+                display_rows = []
+                for row in item.get("table_rows", []):
+                    display_row = {}
+                    for column in columns:
+                        value = str(row.get(column["id"], ""))
+                        if column.get("type") == "checkbox":
+                            value = (
+                                "Да"
+                                if value.casefold() in {"1", "true", "yes", "да"}
+                                else "Нет"
+                            )
+                        display_row[column["label"]] = value
+                    display_rows.append(display_row)
+                frame = pd.DataFrame(display_rows).reindex(
+                    columns=[column["label"] for column in columns]
+                )
+                if frame.empty:
+                    st.caption("Таблица пока не заполнена.")
+                else:
+                    height = min(max(len(frame) * 42 + 40, 120), 700)
+                    st.dataframe(
+                        frame.fillna(""),
+                        width="stretch",
+                        height=height,
+                        hide_index=True,
+                    )
+            elif str(item.get("body", "")).strip():
+                st.markdown(str(item["body"]))
+
+            metadata = []
+            if str(item.get("updated_at", "")).strip():
+                metadata.append(f"Обновлено: {item['updated_at']}")
+            if str(item.get("source", "")).strip():
+                metadata.append(f"Источник: {item['source']}")
+            if metadata:
+                st.caption(" | ".join(metadata))
+
+    return True
 
 def save_everything():
     """Сохраняет все DataFrame в SQLite."""
@@ -322,41 +405,29 @@ def render_table_view(db_key, filtered_df, row_height=80):
             width="small",
             disabled=not st.session_state.is_admin
         )
-    
+
     if st.session_state.is_admin:
-        original_df = st.session_state.db[db_key]
-        with st.expander("Добавить новую строку"):
-            with st.form(f"add_row_{db_key}"):
-                new_values = {}
-                for column in original_df.columns:
-                    if len(column) > 45:
-                        new_values[column] = st.text_area(column, height=100)
-                    else:
-                        new_values[column] = st.text_input(column)
-                add_row = st.form_submit_button("Добавить строку", type="primary")
-
-            if add_row:
-                if not any(str(value).strip() for value in new_values.values()):
-                    st.error("Заполните хотя бы одно поле.")
-                else:
-                    st.session_state.db[db_key] = pd.concat(
-                        [original_df, pd.DataFrame([new_values])],
-                        ignore_index=True,
-                    )
-                    save_everything()
-                    st.success("Строка добавлена.")
-                    st.rerun()
-
-        edited_df = st.data_editor(
-            filtered_df, 
-            num_rows="dynamic", 
-            row_height=row_height, 
-            width="stretch",
-            hide_index=True,
-            column_config=config,
-            key=f"editor_{db_key}"
+        st.caption(
+            "Редактируйте ячейки в таблице. Новые строки добавляются снизу, "
+            "а выбранные строки удаляются через панель редактора."
         )
-        if not edited_df.equals(filtered_df):
+        editable_df = filtered_df.copy()
+        for column in editable_df.columns:
+            editable_df[column] = editable_df[column].astype("string").fillna("")
+        with st.form(f"legacy_table_form_{db_key}"):
+            edited_df = st.data_editor(
+                editable_df,
+                num_rows="dynamic",
+                row_height=row_height,
+                width="stretch",
+                hide_index=True,
+                column_config=config,
+                key=f"editor_{db_key}",
+            )
+            save_table = st.form_submit_button(
+                "Сохранить изменения", type="primary"
+            )
+        if save_table and not edited_df.equals(editable_df):
             original_df = st.session_state.db[db_key]
             if filtered_df.index.equals(original_df.index):
                 st.session_state.db[db_key] = edited_df
@@ -373,6 +444,8 @@ def render_table_view(db_key, filtered_df, row_height=80):
             save_everything()
             st.toast("Изменения сохранены!", icon="💾")
             st.rerun()
+        elif save_table:
+            st.info("Изменений для сохранения нет.")
     else:
         calculated_height = (len(filtered_df) * row_height) + 40
         st.dataframe(filtered_df, row_height=row_height, width="stretch", height=calculated_height, hide_index=True, column_config=config)
@@ -566,8 +639,11 @@ def render_text_editor():
             save_everything()
             st.rerun()
 
-# Наполнение контентом вкладок
-with tab1:
+# Страница типовых ситуаций
+def render_faq_section(section):
+    search_query = render_section_header(section)
+    faq_filtered = search_df(st.session_state.db["faq"], search_query)
+
     if st.session_state.is_admin:
         st.info(
             "Выберите существующий материал для редактирования или создайте новый. "
@@ -577,8 +653,10 @@ with tab1:
 
         st.caption("Предпросмотр для менеджеров")
 
+    dynamic_matches = render_section_materials(section["id"], search_query)
+
     if faq_filtered.empty:
-        if search_query.strip():
+        if search_query.strip() and not dynamic_matches:
             st.info("По вашему запросу ничего не найдено.")
 
     else:
@@ -647,7 +725,20 @@ with tab1:
                     if metadata:
                         st.caption(" | ".join(metadata))
 
-with tab5:
+def render_reference_tables_section(section):
+    search_query = render_section_header(section)
+    experts_filtered = search_df(
+        st.session_state.db["contacts_experts"], search_query
+    )
+    labs_filtered = search_df(st.session_state.db["contacts_labs"], search_query)
+    battary_filtred = search_df(
+        st.session_state.db["testing_battery"], search_query
+    )
+    samples_nd_filtered = search_df(
+        st.session_state.db["samples_nd"], search_query
+    )
+    dynamic_matches = render_section_materials(section["id"], search_query)
+
     # ===== Испытания =====
     if not experts_filtered.empty or not search_query.strip():
 
@@ -804,16 +895,23 @@ ___
         and labs_filtered.empty
         and battary_filtred.empty
         and samples_nd_filtered.empty
+        and not dynamic_matches
     ):
         st.info("По вашему запросу ничего не найдено.")
 
-with tab4:
+
+def render_instructions_section(section):
+    search_query = render_section_header(section)
+    texts_filtered = search_df(st.session_state.db["texts_table"], search_query)
+
     if st.session_state.is_admin:
         st.info(
             "Выберите существующую инструкцию для редактирования или создайте новую. "
             "Текст сохраняется без автоматических изменений."
         )
         render_text_editor()
+
+    dynamic_matches = render_section_materials(section["id"], search_query)
 
     if not texts_filtered.empty:
         for _, row in texts_filtered.iterrows():
@@ -847,6 +945,115 @@ with tab4:
                 if metadata:
                     st.caption(" | ".join(metadata))
 
-    elif search_query.strip():
+    elif search_query.strip() and not dynamic_matches:
         st.info("По вашему запросу ничего не найдено.")
+
+
+def render_home_page():
+    """Главная страница с коротким объяснением новой навигации."""
+    sections = [
+        section
+        for section in load_sections()
+        if section.get("is_visible", True)
+    ]
+    st.title("📚 Единая база знаний")
+    st.write(
+        "Выберите рабочий раздел в боковой панели. Внутри каждого раздела "
+        "доступен поиск по его материалам."
+    )
+
+    faq_col, tables_col, instructions_col = st.columns(3)
+    faq_col.metric("Материалы FAQ", len(st.session_state.db["faq"]))
+    tables_col.metric(
+        "Строки в справочниках",
+        sum(
+            len(st.session_state.db[key])
+            for key in (
+                "contacts_experts",
+                "contacts_labs",
+                "testing_battery",
+                "samples_nd",
+            )
+        ),
+    )
+    instructions_col.metric(
+        "Инструкции", len(st.session_state.db["texts_table"])
+    )
+
+    st.subheader("Разделы")
+    if not sections:
+        st.info("Пока нет опубликованных разделов.")
+        return
+    for section in sections:
+        icon = str(section.get("icon", "")).strip()
+        title = str(section.get("title", "")).strip()
+        st.markdown(f"### {icon} {title}".strip())
+        if str(section.get("description", "")).strip():
+            st.caption(str(section["description"]))
+
+
+def render_custom_section(section):
+    """Показывает материалы пользовательского раздела."""
+    search_query = render_section_header(section)
+    if not render_section_materials(section["id"], search_query):
+        if search_query.strip():
+            st.info("По вашему запросу ничего не найдено.")
+        else:
+            st.info("В этом разделе пока нет опубликованных материалов.")
+
+
+def render_section(section):
+    """Выбирает экран по назначению раздела."""
+    page_kind = section.get("page_kind", "custom")
+    if page_kind == "faq":
+        render_faq_section(section)
+    elif page_kind == "reference_tables":
+        render_reference_tables_section(section)
+    elif page_kind == "instructions":
+        render_instructions_section(section)
+    else:
+        render_custom_section(section)
+
+
+visible_sections = [
+    section
+    for section in load_sections()
+    if section.get("is_visible", True)
+]
+section_pages = [
+    st.Page(
+        partial(render_section, section),
+        title=(
+            f"{str(section.get('icon', '')).strip()} "
+            f"{str(section.get('title', '')).strip()}"
+        ).strip(),
+        url_path=f"section-{section['id'].replace('_', '-')}",
+    )
+    for section in visible_sections
+]
+
+navigation = {
+    "База знаний": [
+        st.Page(render_home_page, title="Главная", icon=":material/home:"),
+        *section_pages,
+    ]
+}
+if st.session_state.is_admin:
+    navigation["Администрирование"] = [
+        st.Page(
+            render_materials_admin,
+            title="Управление материалами",
+            icon=":material/library_books:",
+            url_path="admin-materials",
+        ),
+        st.Page(
+            render_sections_admin,
+            title="Управление разделами",
+            icon=":material/settings:",
+            url_path="admin-sections",
+        )
+    ]
+
+current_page = st.navigation(navigation, position="sidebar")
+current_page.run()
 

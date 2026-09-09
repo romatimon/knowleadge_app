@@ -9,6 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py storage.py ./
+COPY knowledge_base ./knowledge_base
 
 EXPOSE 8501
 
