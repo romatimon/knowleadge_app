@@ -24,36 +24,60 @@ SECTION_ITEM_TYPES = {
     "faq": ("faq", "article"),
     "reference_tables": ("table",),
     "instructions": ("instruction",),
+    "reference": ("article", "table"),
+    "templates": ("article", "instruction"),
 }
+
+SECTION_CATALOG_MIGRATION = "2026-09-section-catalog-v1"
 
 DEFAULT_SECTIONS = (
     {
         "id": "faq",
-        "title": "Типовые ситуации (FAQ)",
+        "title": "FAQ и рабочие ситуации",
         "icon": "❓",
-        "description": "Рабочие ситуации, короткие ответы, правила и исключения.",
+        "description": "Короткие ответы, реальные случаи, отказы, правила и исключения.",
         "page_kind": "faq",
         "position": 10,
         "is_visible": True,
         "is_archived": False,
     },
     {
-        "id": "reference_tables",
-        "title": "Нормы и сроки",
-        "icon": "📊",
-        "description": "Сроки испытаний, документы и нормы отбора образцов.",
-        "page_kind": "reference_tables",
+        "id": "instructions",
+        "title": "Инструкции и алгоритмы",
+        "icon": "🧭",
+        "description": "Пошаговые действия, проверки и внутренние рабочие процессы.",
+        "page_kind": "instructions",
         "position": 20,
         "is_visible": True,
         "is_archived": False,
     },
     {
-        "id": "instructions",
-        "title": "Инструкции и алгоритмы",
-        "icon": "📝",
-        "description": "Пошаговые внутренние инструкции для сотрудников.",
-        "page_kind": "instructions",
+        "id": "reference_tables",
+        "title": "Матрицы, нормы и сроки",
+        "icon": "📊",
+        "description": "Продуктовые матрицы, схемы оценки, сроки и нормы в таблицах.",
+        "page_kind": "reference_tables",
         "position": 30,
+        "is_visible": True,
+        "is_archived": False,
+    },
+    {
+        "id": "reference",
+        "title": "Справочник и нормативная база",
+        "icon": "📚",
+        "description": "Регламенты, определения, сокращения, лаборатории и органы.",
+        "page_kind": "reference",
+        "position": 40,
+        "is_visible": True,
+        "is_archived": False,
+    },
+    {
+        "id": "templates",
+        "title": "Шаблоны и чек-листы",
+        "icon": "✅",
+        "description": "Макеты документов и списки самопроверки перед подачей.",
+        "page_kind": "templates",
+        "position": 50,
         "is_visible": True,
         "is_archived": False,
     },
@@ -116,11 +140,64 @@ def _create_sections_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_migrations_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_migrations (
+            id TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _apply_section_catalog_migration(connection: sqlite3.Connection) -> None:
+    """Один раз обновляет базовые разделы, не затрагивая их материалы."""
+    applied = connection.execute(
+        "SELECT 1 FROM app_migrations WHERE id = ?",
+        (SECTION_CATALOG_MIGRATION,),
+    ).fetchone()
+    if applied:
+        return
+
+    for section in DEFAULT_SECTIONS:
+        connection.execute(
+            """
+            INSERT INTO content_sections (
+                id, title, icon, description, page_kind, position,
+                is_visible, is_archived
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                icon = excluded.icon,
+                description = excluded.description,
+                page_kind = excluded.page_kind,
+                position = excluded.position
+            """,
+            (
+                section["id"],
+                section["title"],
+                section["icon"],
+                section["description"],
+                section["page_kind"],
+                section["position"],
+                int(section["is_visible"]),
+                int(section["is_archived"]),
+            ),
+        )
+
+    connection.execute(
+        "INSERT INTO app_migrations (id, applied_at) VALUES (?, ?)",
+        (SECTION_CATALOG_MIGRATION, datetime.now(UTC).isoformat()),
+    )
+
+
 def _initialize_sections() -> None:
     """Создаёт метаданные разделов, не изменяя таблицы с материалами."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     database_exists = SQLITE_PATH.is_file()
     schema_exists = False
+    migration_applied = False
 
     if database_exists:
         with closing(sqlite3.connect(SQLITE_PATH)) as connection:
@@ -128,38 +205,24 @@ def _initialize_sections() -> None:
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' "
                 "AND name = 'content_sections'"
             ).fetchone() is not None
+            migrations_exist = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'app_migrations'"
+            ).fetchone() is not None
+            if migrations_exist:
+                migration_applied = connection.execute(
+                    "SELECT 1 FROM app_migrations WHERE id = ?",
+                    (SECTION_CATALOG_MIGRATION,),
+                ).fetchone() is not None
 
-    if database_exists and not schema_exists:
+    if database_exists and (not schema_exists or not migration_applied):
         _create_backup()
 
     with closing(sqlite3.connect(SQLITE_PATH)) as connection:
         with connection:
             _create_sections_schema(connection)
-            existing_count = connection.execute(
-                "SELECT COUNT(*) FROM content_sections"
-            ).fetchone()[0]
-            if existing_count == 0:
-                connection.executemany(
-                    """
-                    INSERT INTO content_sections (
-                        id, title, icon, description, page_kind, position,
-                        is_visible, is_archived
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            section["id"],
-                            section["title"],
-                            section["icon"],
-                            section["description"],
-                            section["page_kind"],
-                            section["position"],
-                            int(section["is_visible"]),
-                            int(section["is_archived"]),
-                        )
-                        for section in DEFAULT_SECTIONS
-                    ],
-                )
+            _create_migrations_schema(connection)
+            _apply_section_catalog_migration(connection)
 
 
 def load_sections(include_archived: bool = False) -> list[dict[str, Any]]:
@@ -194,6 +257,27 @@ def save_section(section: Mapping[str, Any]) -> None:
     _create_backup()
     with closing(sqlite3.connect(SQLITE_PATH)) as connection:
         with connection:
+            page_kind = str(section.get("page_kind", "custom")).strip() or "custom"
+            content_schema_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'content_items'"
+            ).fetchone() is not None
+            if content_schema_exists:
+                stored_types = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT DISTINCT item_type FROM content_items "
+                        "WHERE section_id = ? AND is_archived = 0",
+                        (section_id,),
+                    )
+                }
+                incompatible = stored_types - set(allowed_item_types(page_kind))
+                if incompatible:
+                    raise ValueError(
+                        "Назначение раздела не подходит для уже созданных "
+                        "в нём материалов."
+                    )
+
             connection.execute(
                 """
                 INSERT INTO content_sections (
@@ -214,7 +298,7 @@ def save_section(section: Mapping[str, Any]) -> None:
                     title,
                     str(section.get("icon", "")).strip(),
                     str(section.get("description", "")).strip(),
-                    str(section.get("page_kind", "custom")).strip() or "custom",
+                    page_kind,
                     int(section.get("position", 0)),
                     int(bool(section.get("is_visible", True))),
                     int(bool(section.get("is_archived", False))),

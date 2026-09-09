@@ -1,5 +1,7 @@
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,7 +37,23 @@ class SectionStorageTests(unittest.TestCase):
 
         self.assertEqual(
             [section["page_kind"] for section in sections],
-            ["faq", "reference_tables", "instructions"],
+            [
+                "faq",
+                "instructions",
+                "reference_tables",
+                "reference",
+                "templates",
+            ],
+        )
+        self.assertEqual(
+            [section["title"] for section in sections],
+            [
+                "FAQ и рабочие ситуации",
+                "Инструкции и алгоритмы",
+                "Матрицы, нормы и сроки",
+                "Справочник и нормативная база",
+                "Шаблоны и чек-листы",
+            ],
         )
 
     def test_section_can_be_created_edited_archived_and_restored(self):
@@ -68,6 +86,60 @@ class SectionStorageTests(unittest.TestCase):
             item for item in storage.load_sections() if item["id"] == "samples"
         )
         self.assertFalse(restored["is_visible"])
+
+    def test_catalog_migration_runs_once_and_preserves_visibility(self):
+        with closing(sqlite3.connect(storage.SQLITE_PATH)) as connection:
+            storage._create_sections_schema(connection)
+            connection.execute(
+                """
+                INSERT INTO content_sections (
+                    id, title, icon, description, page_kind, position,
+                    is_visible, is_archived
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "faq",
+                    "Старое название FAQ",
+                    "❓",
+                    "Старое описание",
+                    "faq",
+                    10,
+                    0,
+                    0,
+                ),
+            )
+            connection.commit()
+
+        migrated = storage.load_sections()
+        faq = next(section for section in migrated if section["id"] == "faq")
+        self.assertEqual(faq["title"], "FAQ и рабочие ситуации")
+        self.assertFalse(faq["is_visible"])
+        self.assertEqual(len(migrated), 5)
+
+        faq["title"] = "Моё название"
+        storage.save_section(faq)
+        reloaded = next(
+            section for section in storage.load_sections() if section["id"] == "faq"
+        )
+        self.assertEqual(reloaded["title"], "Моё название")
+
+    def test_section_purpose_cannot_hide_existing_material_type(self):
+        storage.save_content_item(
+            {
+                "id": "faq-example",
+                "section_id": "faq",
+                "item_type": "faq",
+                "title": "Рабочая ситуация",
+                "body": "Краткий ответ",
+            }
+        )
+        faq = next(
+            section for section in storage.load_sections() if section["id"] == "faq"
+        )
+        faq["page_kind"] = "reference_tables"
+
+        with self.assertRaisesRegex(ValueError, "не подходит"):
+            storage.save_section(faq)
 
     def test_admin_page_creates_section(self):
         page = AppTest.from_function(render_sections_test_page).run(timeout=30)

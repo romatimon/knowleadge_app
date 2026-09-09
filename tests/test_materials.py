@@ -150,6 +150,10 @@ class MaterialTests(unittest.TestCase):
         self.assertEqual(storage.allowed_item_types("faq"), ("faq", "article"))
         self.assertEqual(storage.allowed_item_types("reference_tables"), ("table",))
         self.assertEqual(storage.allowed_item_types("instructions"), ("instruction",))
+        self.assertEqual(storage.allowed_item_types("reference"), ("article", "table"))
+        self.assertEqual(
+            storage.allowed_item_types("templates"), ("article", "instruction")
+        )
 
         with self.assertRaisesRegex(ValueError, "нельзя сохранять"):
             storage.save_content_item(

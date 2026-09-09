@@ -24,7 +24,7 @@ from storage import (
 
 TYPE_LABELS = {
     "faq": "FAQ / рабочая ситуация",
-    "article": "Статья",
+    "article": "Справка / статья",
     "instruction": "Инструкция",
     "table": "Таблица",
 }
@@ -865,7 +865,7 @@ def render_materials_admin() -> None:
         section for section in load_sections() if not section.get("is_archived")
     ]
     if not sections:
-        st.title("🗂️ Управление материалами")
+        st.title("🗂️ Материалы")
         st.info("Сначала создайте хотя бы один раздел.")
         return
 
@@ -873,10 +873,10 @@ def render_materials_admin() -> None:
     active_items = [item for item in items if not item["is_archived"]]
     archived_items = [item for item in items if item["is_archived"]]
 
-    st.title("🗂️ Управление материалами")
+    st.title("🗂️ Материалы")
     st.caption(
-        "Выберите раздел и создайте FAQ, статью, инструкцию или таблицу. "
-        "Опубликованные материалы появятся внутри выбранного раздела."
+        "Сначала выберите рабочий раздел. Доступные формы зависят от его "
+        "назначения: FAQ, инструкция, справка или таблица."
     )
     sections_col, items_col, published_col = st.columns(3)
     sections_col.metric("Разделы", len(sections))

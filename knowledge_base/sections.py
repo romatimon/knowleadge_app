@@ -10,6 +10,25 @@ import streamlit as st
 from storage import archive_section, load_sections, restore_section, save_section
 
 
+SECTION_KIND_LABELS = {
+    "faq": "FAQ и рабочие ситуации",
+    "instructions": "Инструкции и алгоритмы",
+    "reference_tables": "Матрицы, нормы и сроки",
+    "reference": "Справочник и нормативная база",
+    "templates": "Шаблоны и чек-листы",
+    "custom": "Универсальный раздел",
+}
+
+SECTION_KIND_HINTS = {
+    "faq": "FAQ и справочные статьи",
+    "instructions": "только пошаговые инструкции",
+    "reference_tables": "только таблицы и памятки к ним",
+    "reference": "справочные статьи и таблицы",
+    "templates": "шаблоны, чек-листы и инструкции по их заполнению",
+    "custom": "любые типы материалов",
+}
+
+
 def _section_label(section: dict) -> str:
     icon = str(section.get("icon", "")).strip()
     title = str(section.get("title", "")).strip()
@@ -27,8 +46,8 @@ def render_sections_admin() -> None:
 
     st.title("⚙️ Управление разделами")
     st.caption(
-        "Разделы из этого списка автоматически появляются в боковой навигации. "
-        "Удаление выполняется через архив и не уничтожает материалы."
+        "Здесь настраивается боковая навигация сотрудников. Укажите назначение "
+        "раздела — редактор предложит только подходящие типы материалов."
     )
 
     visible_count = sum(section["is_visible"] for section in active)
@@ -72,6 +91,24 @@ def render_sections_admin() -> None:
                 height=100,
                 placeholder="Какие материалы сотрудник найдёт в этом разделе",
             )
+            kind_options = list(SECTION_KIND_LABELS)
+            selected_kind = str(selected.get("page_kind", "custom"))
+            if selected_kind not in kind_options:
+                kind_options.append(selected_kind)
+            page_kind = st.selectbox(
+                "Назначение раздела",
+                kind_options,
+                index=kind_options.index(selected_kind),
+                format_func=lambda value: SECTION_KIND_LABELS.get(
+                    value, "Пользовательское назначение"
+                ),
+                help=(
+                    "Назначение определяет, какие материалы можно добавлять. "
+                    "Его нельзя сменить на несовместимое с уже созданными материалами."
+                ),
+            )
+            kind_hint = SECTION_KIND_HINTS.get(page_kind, "любых материалов")
+            st.caption(f"Подходит для: {kind_hint}.")
             position = st.number_input(
                 "Порядок в боковой панели",
                 min_value=0,
@@ -83,12 +120,6 @@ def render_sections_admin() -> None:
                 value=bool(selected.get("is_visible", True)),
             )
             submitted = st.form_submit_button("Сохранить раздел", type="primary")
-
-        if selected_id and selected.get("page_kind") != "custom":
-            st.info(
-                "Этот раздел связан с существующими материалами. Его можно "
-                "переименовать, скрыть или переместить в архив."
-            )
 
         if submitted:
             clean_title = title.strip()
@@ -107,7 +138,7 @@ def render_sections_admin() -> None:
                     "title": clean_title,
                     "icon": icon.strip(),
                     "description": description.strip(),
-                    "page_kind": selected.get("page_kind", "custom"),
+                    "page_kind": page_kind,
                     "position": int(position),
                     "is_visible": bool(is_visible),
                     "is_archived": False,

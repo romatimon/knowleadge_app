@@ -17,7 +17,12 @@ from storage import (
 )
 
 # Настройка конфигурации страницы
-st.set_page_config(page_title="База знаний менеджера", layout="wide")
+st.set_page_config(
+    page_title="Единая база знаний",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 DYNAMIC_TABLE_ROW_HEIGHT = 80
@@ -37,32 +42,52 @@ if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
 with st.sidebar:
+    st.markdown("### 📚 База знаний")
+    st.caption("Рабочая информация для сотрудников")
     if not ADMIN_PASSWORD:
         st.warning("Режим администратора недоступен: переменная ADMIN_PASSWORD не настроена.")
     elif not st.session_state.is_admin:
-        st.header("Вход администратора")
-        p = st.text_input("Пароль", type="password", key="admin_password")
-        if st.button("Войти", width="stretch"):
-            if passwords_match(p, ADMIN_PASSWORD):
-                st.session_state.is_admin = True
-                st.rerun()
-            else:
-                st.error("Неверный пароль")
+        with st.expander("Вход администратора"):
+            p = st.text_input("Пароль", type="password", key="admin_password")
+            if st.button("Войти", width="stretch"):
+                if passwords_match(p, ADMIN_PASSWORD):
+                    st.session_state.is_admin = True
+                    st.rerun()
+                else:
+                    st.error("Неверный пароль")
     else:
-        st.success("Режим администратора включен")
-        if st.button("Выйти", width="stretch"):
-            st.session_state.is_admin = False
-            st.rerun()
+        with st.expander("Администратор", expanded=False):
+            st.success("Режим редактирования включён")
+            if st.button("Выйти", width="stretch"):
+                st.session_state.is_admin = False
+                st.rerun()
 
 # ===== 4. ОБЩИЙ СТИЛЬ СТРАНИЦ =====
 st.markdown(
     """
     <style>
     :root {
-        --kb-accent: #1f6f78;
-        --kb-accent-soft: #e8f3f3;
-        --kb-border: #d9e2e3;
-        --kb-muted: #607174;
+        --kb-accent: #176b73;
+        --kb-accent-soft: #edf7f6;
+        --kb-border: #d9e5e4;
+        --kb-muted: #5f7072;
+    }
+
+    .stMainBlockContainer {
+        max-width: 1500px;
+        padding-top: 2.2rem;
+        padding-bottom: 4rem;
+    }
+
+    [data-testid="stSidebar"] {
+        border-right: 1px solid var(--kb-border);
+    }
+
+    [data-testid="stSidebarNav"] a[aria-current="page"] {
+        background: var(--kb-accent-soft);
+        border-radius: 8px;
+        color: var(--kb-accent);
+        font-weight: 650;
     }
 
     [data-testid="stTextInput"] {
@@ -85,8 +110,9 @@ st.markdown(
 
     [data-testid="stExpander"] {
         border: 1px solid var(--kb-border);
-        border-radius: 6px;
-        margin-bottom: 0.65rem;
+        border-radius: 10px;
+        margin-bottom: 0.75rem;
+        overflow: hidden;
     }
 
     [data-testid="stExpander"] summary:hover {
@@ -96,14 +122,28 @@ st.markdown(
     [data-testid="stCaptionContainer"] {
         color: var(--kb-muted);
     }
+
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        border-color: var(--kb-border);
+        border-radius: 12px;
+    }
+
+    div[data-testid="stDataFrame"] {
+        border: 1px solid var(--kb-border);
+        border-radius: 8px;
+        overflow: hidden;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-def clear_search():
-    """Очищает поле поиска"""
-    st.session_state.search_input_key = ""
+SECTION_PAGE_BY_ID = {}
+
+
+def clear_search(key):
+    """Очищает указанное поле поиска."""
+    st.session_state[key] = ""
 
 def render_section_header(section):
     """Показывает заголовок раздела и единое поле поиска."""
@@ -113,43 +153,51 @@ def render_section_header(section):
     if str(section.get("description", "")).strip():
         st.caption(str(section["description"]))
 
-    col_search, col_clear = st.columns([6, 1])
+    search_key = f"section_search_{section['id']}"
+    col_search, col_clear = st.columns([7, 1])
     with col_search:
         query = st.text_input(
             "Поиск в разделе",
             placeholder="Например: МЧД, 007/2011, ДС 353...",
-            key="search_input_key",
+            key=search_key,
         )
     with col_clear:
         st.markdown("<div style='padding-top: 28px;'></div>", unsafe_allow_html=True)
-        st.button("Сбросить", width="stretch", on_click=clear_search)
+        st.button(
+            "Сбросить",
+            width="stretch",
+            on_click=clear_search,
+            args=(search_key,),
+        )
     return query
 
 
-def render_section_materials(section_id, search_query):
-    """Показывает опубликованные универсальные материалы выбранного раздела."""
-    items = [
-        item
-        for item in load_content_items(section_id=section_id)
-        if item.get("is_visible", True)
-    ]
-    filtered_items = filter_content_items(items, search_query)
-    if not filtered_items:
-        return False
-
-    st.subheader("Материалы раздела")
+def render_content_items(items, search_query="", section_titles=None):
+    """Показывает список материалов в одинаковом виде на всех страницах."""
     type_icons = {
         "faq": "❓",
         "article": "📄",
         "instruction": "🧭",
         "table": "📊",
     }
-    for item in filtered_items:
+    type_labels = {
+        "faq": "FAQ / рабочая ситуация",
+        "article": "Справочная статья",
+        "instruction": "Инструкция",
+        "table": "Таблица",
+    }
+    for item in items:
         icon = type_icons.get(item.get("item_type"), "📄")
+        title = f"{icon} {item['title']}"
+        if section_titles:
+            section_title = section_titles.get(item.get("section_id"), "")
+            if section_title:
+                title = f"{title} · {section_title}"
         with st.expander(
-            f"{icon} {item['title']}",
+            title,
             expanded=bool(search_query.strip()),
         ):
+            st.caption(type_labels.get(item.get("item_type"), "Материал"))
             if str(item.get("summary", "")).strip():
                 st.info(str(item["summary"]))
 
@@ -216,10 +264,30 @@ def render_section_materials(section_id, search_query):
             if metadata:
                 st.caption(" | ".join(metadata))
 
+
+def render_section_materials(section_id, search_query):
+    """Показывает опубликованные материалы выбранного раздела."""
+    items = [
+        item
+        for item in load_content_items(section_id=section_id)
+        if item.get("is_visible", True)
+    ]
+    filtered_items = filter_content_items(items, search_query)
+    if not filtered_items:
+        return False
+
+    result_label = (
+        f"Найдено: {len(filtered_items)}"
+        if search_query.strip()
+        else f"Материалов: {len(filtered_items)}"
+    )
+    st.caption(result_label)
+    render_content_items(filtered_items, search_query)
     return True
 
+
 def render_home_page():
-    """Главная страница с коротким объяснением новой навигации."""
+    """Главная страница с поиском и рабочими направлениями."""
     sections = [
         section
         for section in load_sections()
@@ -228,46 +296,53 @@ def render_home_page():
     published_items = [
         item for item in load_content_items() if item.get("is_visible", True)
     ]
-    st.title("📚 Единая база знаний")
+    section_titles = {section["id"]: section["title"] for section in sections}
+
+    st.title("Единая база знаний")
     st.write(
-        "Выберите рабочий раздел в боковой панели. Внутри каждого раздела "
-        "доступен поиск по его материалам."
+        "Найдите готовый ответ или откройте нужное рабочее направление."
     )
 
-    faq_col, tables_col, instructions_col = st.columns(3)
-    faq_col.metric(
-        "Статьи и FAQ",
-        sum(
-            item.get("item_type") in {"article", "faq"}
-            for item in published_items
-        ),
+    home_query = st.text_input(
+        "Поиск по всей базе",
+        placeholder="Введите документ, номер регламента, продукцию или рабочую ситуацию",
+        key="home_search_query",
     )
-    tables_col.metric(
-        "Строки в таблицах",
-        sum(
-            len(item.get("table_rows", []))
-            for item in published_items
-            if item.get("item_type") == "table"
-        ),
-    )
-    instructions_col.metric(
-        "Инструкции",
-        sum(
-            item.get("item_type") == "instruction"
-            for item in published_items
-        ),
-    )
+    if home_query.strip():
+        results = filter_content_items(published_items, home_query)
+        st.subheader(f"Результаты поиска · {len(results)}")
+        if results:
+            render_content_items(results, home_query, section_titles)
+        else:
+            st.info(
+                "Ничего не найдено. Попробуйте номер без лишних слов или другой термин."
+            )
+        return
 
-    st.subheader("Разделы")
+    st.subheader("Рабочие направления")
     if not sections:
         st.info("Пока нет опубликованных разделов.")
         return
-    for section in sections:
-        icon = str(section.get("icon", "")).strip()
-        title = str(section.get("title", "")).strip()
-        st.markdown(f"### {icon} {title}".strip())
-        if str(section.get("description", "")).strip():
-            st.caption(str(section["description"]))
+    columns = st.columns(2)
+    for index, section in enumerate(sections):
+        section_items = [
+            item for item in published_items if item.get("section_id") == section["id"]
+        ]
+        with columns[index % 2]:
+            with st.container(border=True):
+                icon = str(section.get("icon", "")).strip()
+                title = str(section.get("title", "")).strip()
+                st.markdown(f"### {icon} {title}".strip())
+                if str(section.get("description", "")).strip():
+                    st.caption(str(section["description"]))
+                st.caption(f"Материалов: {len(section_items)}")
+                page = SECTION_PAGE_BY_ID.get(section["id"])
+                if page is not None:
+                    st.page_link(
+                        page,
+                        label="Открыть раздел",
+                        icon=":material/arrow_forward:",
+                    )
 
 
 def render_custom_section(section):
@@ -301,6 +376,12 @@ section_pages = [
     )
     for section in visible_sections
 ]
+SECTION_PAGE_BY_ID.update(
+    {
+        section["id"]: page
+        for section, page in zip(visible_sections, section_pages, strict=True)
+    }
+)
 
 navigation = {
     "База знаний": [
@@ -312,13 +393,13 @@ if st.session_state.is_admin:
     navigation["Администрирование"] = [
         st.Page(
             render_materials_admin,
-            title="Управление материалами",
+            title="Материалы",
             icon=":material/library_books:",
             url_path="admin-materials",
         ),
         st.Page(
             render_sections_admin,
-            title="Управление разделами",
+            title="Разделы и навигация",
             icon=":material/settings:",
             url_path="admin-sections",
         )
