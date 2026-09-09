@@ -14,6 +14,7 @@ from knowledge_base.materials import (
     _parse_columns_editor,
     _read_table_file,
     filter_content_items,
+    table_column_width,
 )
 from streamlit.testing.v1 import AppTest
 
@@ -145,6 +146,22 @@ class MaterialTests(unittest.TestCase):
         self.assertEqual(item["item_type"], "faq")
         self.assertIn("Проверить документы", item["body"])
 
+    def test_default_sections_restrict_material_types(self):
+        self.assertEqual(storage.allowed_item_types("faq"), ("faq", "article"))
+        self.assertEqual(storage.allowed_item_types("reference_tables"), ("table",))
+        self.assertEqual(storage.allowed_item_types("instructions"), ("instruction",))
+
+        with self.assertRaisesRegex(ValueError, "нельзя сохранять"):
+            storage.save_content_item(
+                {
+                    "id": "wrong-table",
+                    "section_id": "faq",
+                    "item_type": "table",
+                    "title": "Таблица не в том разделе",
+                    "table_columns": ["Колонка"],
+                }
+            )
+
     def test_search_filters_rows_inside_new_table(self):
         item = {
             "id": "validity-periods",
@@ -183,6 +200,12 @@ class MaterialTests(unittest.TestCase):
         matches = filter_content_items([item], "сроки документов")
 
         self.assertEqual(matches[0]["table_rows"], item["table_rows"])
+
+    def test_table_column_width_adapts_to_column_count(self):
+        self.assertEqual(table_column_width(3), "large")
+        self.assertEqual(table_column_width(5), "medium")
+        self.assertEqual(table_column_width(6), "small")
+        self.assertEqual(table_column_width(8), "small")
 
     def test_csv_import_supports_semicolon_and_cp1251(self):
         content = "Продукция;Количество\nМолоко;5\n".encode("cp1251")

@@ -6,7 +6,11 @@ import pandas as pd
 import streamlit as st
 
 from knowledge_base.sections import render_sections_admin
-from knowledge_base.materials import filter_content_items, render_materials_admin
+from knowledge_base.materials import (
+    filter_content_items,
+    render_materials_admin,
+    table_column_width,
+)
 from storage import (
     load_content_items,
     load_sections,
@@ -17,7 +21,7 @@ st.set_page_config(page_title="База знаний менеджера", layout
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 DYNAMIC_TABLE_ROW_HEIGHT = 80
-DYNAMIC_TABLE_VISIBLE_ROWS = 20
+DYNAMIC_TABLE_VISIBLE_ROWS = 15
 
 
 def passwords_match(candidate, expected):
@@ -188,7 +192,7 @@ def render_section_materials(section_id, search_query):
                             width=(
                                 "small"
                                 if column.get("type") == "checkbox"
-                                else "large"
+                                else table_column_width(len(columns))
                             ),
                         )
                         for column in columns

@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from storage import (
+    allowed_item_types,
     archive_content_item,
     load_content_items,
     load_sections,
@@ -126,6 +127,15 @@ def filter_content_items(items: list[dict], query: str) -> list[dict]:
     return results
 
 
+def table_column_width(column_count: int) -> str:
+    """Подбирает ширину колонок так, чтобы таблица помещалась на экране."""
+    if column_count <= 3:
+        return "large"
+    if column_count <= 5:
+        return "medium"
+    return "small"
+
+
 def _parse_date(value: str) -> date:
     try:
         return date.fromisoformat(value)
@@ -226,8 +236,14 @@ def _render_settings_form(
     active_items: list[dict],
 ) -> None:
     section_by_id = {section["id"]: section for section in sections}
-    section_ids = list(section_by_id)
+    section_ids = [
+        section_id
+        for section_id, section in section_by_id.items()
+        if item_type in allowed_item_types(str(section.get("page_kind", "custom")))
+    ]
     current_section_id = selected.get("section_id", section_ids[0])
+    if current_section_id not in section_ids:
+        current_section_id = section_ids[0]
 
     with st.form(f"material_form_{selected_id or 'new'}_{item_type}"):
         section_id = st.selectbox(
@@ -403,6 +419,7 @@ def _table_editor_data(selected: dict) -> tuple[pd.DataFrame, dict]:
     column_ids = [column["id"] for column in columns]
     frame = pd.DataFrame(selected.get("table_rows", [])).reindex(columns=column_ids)
     config = {}
+    content_width = table_column_width(len(columns))
 
     for column in columns:
         column_id = column["id"]
@@ -411,7 +428,7 @@ def _table_editor_data(selected: dict) -> tuple[pd.DataFrame, dict]:
         if column.get("type") == "number":
             frame[column_id] = pd.to_numeric(frame[column_id], errors="coerce")
             config[column_id] = st.column_config.NumberColumn(
-                label, help=label, required=required, width="medium"
+                label, help=label, required=required, width=content_width
             )
         elif column.get("type") == "checkbox":
             frame[column_id] = frame[column_id].map(_checkbox_value).astype(bool)
@@ -421,7 +438,7 @@ def _table_editor_data(selected: dict) -> tuple[pd.DataFrame, dict]:
         else:
             frame[column_id] = frame[column_id].astype("string").fillna("")
             config[column_id] = st.column_config.TextColumn(
-                label, help=label, required=required, width="large"
+                label, help=label, required=required, width=content_width
             )
     return frame, config
 
@@ -708,7 +725,15 @@ def _render_delete_action(selected_id: str) -> None:
 def _render_active_editor(sections: list[dict], active_items: list[dict]) -> None:
     section_by_id = {section["id"]: section for section in sections}
     section_ids = list(section_by_id)
-    type_ids = list(TYPE_LABELS)
+    type_ids = [
+        item_type
+        for item_type in TYPE_LABELS
+        if any(
+            item_type
+            in allowed_item_types(str(section.get("page_kind", "custom")))
+            for section in sections
+        )
+    ]
 
     section_filter_col, type_filter_col = st.columns(2)
     with section_filter_col:
@@ -720,14 +745,32 @@ def _render_active_editor(sections: list[dict], active_items: list[dict]) -> Non
             ),
             key="material_admin_section_filter",
         )
+    filter_type_ids = (
+        list(
+            allowed_item_types(
+                str(section_by_id[section_filter].get("page_kind", "custom"))
+            )
+        )
+        if section_filter
+        else type_ids
+    )
     with type_filter_col:
         type_filter = st.selectbox(
             "Фильтр: тип",
-            [""] + type_ids,
+            [""] + filter_type_ids,
             format_func=lambda value: (
                 "Все типы" if not value else TYPE_LABELS[value]
             ),
-            key="material_admin_type_filter",
+            key=f"material_admin_type_filter_{section_filter or 'all'}",
+        )
+
+    if section_filter:
+        allowed_labels = ", ".join(
+            TYPE_LABELS[item_type] for item_type in filter_type_ids
+        )
+        st.caption(
+            f"Для раздела «{section_by_id[section_filter]['title']}» доступны: "
+            f"{allowed_labels}."
         )
 
     filtered_items = [
@@ -755,11 +798,17 @@ def _render_active_editor(sections: list[dict], active_items: list[dict]) -> Non
     if not selected_id and section_filter:
         selected = {"section_id": section_filter}
 
-    selected_type = selected.get("item_type", type_filter or "article")
+    new_type_ids = [type_filter] if type_filter else filter_type_ids
+    default_type = (
+        type_filter
+        or ("article" if "article" in new_type_ids else new_type_ids[0])
+    )
+    selected_type = selected.get("item_type", default_type)
+    editor_type_ids = [selected_type] if selected_id else new_type_ids
     item_type = st.selectbox(
         "Тип материала",
-        type_ids,
-        index=type_ids.index(selected_type),
+        editor_type_ids,
+        index=editor_type_ids.index(selected_type),
         format_func=lambda value: TYPE_LABELS[value],
         key=f"material_type_{selected_id or 'new'}",
         disabled=bool(selected_id),

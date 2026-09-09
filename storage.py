@@ -19,6 +19,13 @@ SQLITE_PATH = DATA_DIR / "knowledge.db"
 BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_LIMIT = 10
 
+CONTENT_ITEM_TYPES = ("faq", "article", "instruction", "table")
+SECTION_ITEM_TYPES = {
+    "faq": ("faq", "article"),
+    "reference_tables": ("table",),
+    "instructions": ("instruction",),
+}
+
 DEFAULT_SECTIONS = (
     {
         "id": "faq",
@@ -51,6 +58,11 @@ DEFAULT_SECTIONS = (
         "is_archived": False,
     },
 )
+
+
+def allowed_item_types(page_kind: str) -> tuple[str, ...]:
+    """Возвращает допустимые типы материалов для назначения раздела."""
+    return SECTION_ITEM_TYPES.get(page_kind, CONTENT_ITEM_TYPES)
 
 
 def _check_integrity(connection: sqlite3.Connection) -> None:
@@ -400,7 +412,7 @@ def save_content_item(item: Mapping[str, Any]) -> None:
     title = str(item.get("title", "")).strip()
     if not item_id or not section_id or not title:
         raise ValueError("Идентификатор, раздел и название материала обязательны.")
-    if item_type not in {"faq", "article", "instruction", "table"}:
+    if item_type not in CONTENT_ITEM_TYPES:
         raise ValueError("Неизвестный тип материала.")
 
     columns, rows = _normalize_table_content(
@@ -413,12 +425,14 @@ def save_content_item(item: Mapping[str, Any]) -> None:
     _create_backup()
     with closing(sqlite3.connect(SQLITE_PATH)) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
-        section_exists = connection.execute(
-            "SELECT 1 FROM content_sections WHERE id = ?",
+        section_row = connection.execute(
+            "SELECT page_kind FROM content_sections WHERE id = ?",
             (section_id,),
         ).fetchone()
-        if section_exists is None:
+        if section_row is None:
             raise ValueError("Выбранный раздел не существует.")
+        if item_type not in allowed_item_types(str(section_row[0])):
+            raise ValueError("Этот тип материала нельзя сохранять в выбранном разделе.")
 
         with connection:
             connection.execute(
