@@ -13,6 +13,7 @@ from knowledge_base.materials import (
     _map_import_rows,
     _parse_columns_editor,
     _read_table_file,
+    filter_content_items,
 )
 from streamlit.testing.v1 import AppTest
 
@@ -125,6 +126,63 @@ class MaterialTests(unittest.TestCase):
 
         self.assertEqual(renamed["table_columns"][0]["id"], column_id)
         self.assertEqual(renamed["table_rows"][0][column_id], "Молоко")
+
+    def test_faq_is_stored_as_universal_material(self):
+        storage.save_content_item(
+            {
+                "id": "faq-sample",
+                "section_id": "faq",
+                "item_type": "faq",
+                "title": "Что делать в рабочей ситуации?",
+                "summary": "Краткий ответ сотруднику",
+                "body": "## Что делать\n\n1. Проверить документы.",
+                "keywords": "ситуация; документы",
+            }
+        )
+
+        item = storage.load_content_items(section_id="faq")[0]
+
+        self.assertEqual(item["item_type"], "faq")
+        self.assertIn("Проверить документы", item["body"])
+
+    def test_search_filters_rows_inside_new_table(self):
+        item = {
+            "id": "validity-periods",
+            "item_type": "table",
+            "title": "Сроки действия документов",
+            "summary": "Справочная таблица",
+            "body": "Срок зависит от схемы подтверждения.",
+            "keywords": "сертификат; декларация",
+            "source": "Регламенты",
+            "table_columns": [
+                {"id": "regulation", "label": "Регламент", "type": "text"},
+                {"id": "period", "label": "Срок", "type": "text"},
+            ],
+            "table_rows": [
+                {"regulation": "ТР ТС 007/2011", "period": "5 лет"},
+                {"regulation": "ТР ТС 017/2011", "period": "3 года"},
+            ],
+        }
+
+        matches = filter_content_items([item], "007")
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(
+            matches[0]["table_rows"],
+            [{"regulation": "ТР ТС 007/2011", "period": "5 лет"}],
+        )
+
+    def test_search_by_table_title_keeps_all_rows(self):
+        item = {
+            "item_type": "table",
+            "title": "Сроки действия документов",
+            "table_columns": [],
+            "table_rows": [{"value": "007"}, {"value": "017"}],
+        }
+
+        matches = filter_content_items([item], "сроки документов")
+
+        self.assertEqual(matches[0]["table_rows"], item["table_rows"])
 
     def test_csv_import_supports_semicolon_and_cp1251(self):
         content = "Продукция;Количество\nМолоко;5\n".encode("cp1251")

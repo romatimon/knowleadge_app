@@ -22,6 +22,7 @@ from storage import (
 
 
 TYPE_LABELS = {
+    "faq": "FAQ / рабочая ситуация",
     "article": "Статья",
     "instruction": "Инструкция",
     "table": "Таблица",
@@ -34,6 +35,7 @@ COLUMN_TYPE_LABELS = {
 }
 
 MAX_IMPORT_ROWS = 50_000
+TABLE_ROW_HEIGHT = 80
 
 INSTRUCTION_TEMPLATE = """## Назначение
 
@@ -56,6 +58,72 @@ INSTRUCTION_TEMPLATE = """## Назначение
 
 Укажите, как проверить завершение работы.
 """
+
+FAQ_TEMPLATE = """## Краткий ответ
+
+Дайте сотруднику прямой ответ на вопрос.
+
+## Что делать
+
+1. Укажите первое действие.
+2. Укажите следующее действие.
+
+## Важно
+
+- Опишите ограничения и исключения.
+"""
+
+
+def _normalize_search_text(value: object) -> str:
+    """Приводит пользовательский текст к словам для нечувствительного поиска."""
+    return re.sub(r"[^\w]+", " ", str(value).casefold(), flags=re.UNICODE).strip()
+
+
+def filter_content_items(items: list[dict], query: str) -> list[dict]:
+    """Фильтрует материалы, а у таблиц оставляет только найденные строки."""
+    terms = _normalize_search_text(query).split()
+    if not terms:
+        return list(items)
+
+    results = []
+    for item in items:
+        metadata_text = _normalize_search_text(
+            " ".join(
+                [
+                    str(item.get("title", "")),
+                    str(item.get("summary", "")),
+                    str(item.get("body", "")),
+                    str(item.get("keywords", "")),
+                    str(item.get("source", "")),
+                    " ".join(
+                        str(column.get("label", ""))
+                        for column in item.get("table_columns", [])
+                    ),
+                ]
+            )
+        )
+
+        if item.get("item_type") != "table":
+            if all(term in metadata_text for term in terms):
+                results.append(item)
+            continue
+
+        rows = item.get("table_rows", [])
+        matching_rows = []
+        for row in rows:
+            row_text = _normalize_search_text(" ".join(map(str, row.values())))
+            combined_text = f"{metadata_text} {row_text}"
+            if all(term in combined_text for term in terms):
+                matching_rows.append(row)
+
+        if matching_rows or (
+            not rows and all(term in metadata_text for term in terms)
+        ):
+            filtered_item = dict(item)
+            filtered_item["table_rows"] = matching_rows
+            results.append(filtered_item)
+
+    return results
 
 
 def _parse_date(value: str) -> date:
@@ -187,6 +255,7 @@ def _render_settings_form(
             columns_editor = st.data_editor(
                 _columns_frame(selected.get("table_columns", [])),
                 num_rows="dynamic",
+                row_height=TABLE_ROW_HEIGHT,
                 width="stretch",
                 hide_index=True,
                 column_config={
@@ -224,11 +293,14 @@ def _render_settings_form(
                 help="Можно использовать Markdown: заголовки, списки и выделение.",
             )
         else:
-            default_body = (
-                INSTRUCTION_TEMPLATE
-                if item_type == "instruction" and not selected_id
-                else str(selected.get("body", ""))
-            )
+            if selected_id:
+                default_body = str(selected.get("body", ""))
+            elif item_type == "instruction":
+                default_body = INSTRUCTION_TEMPLATE
+            elif item_type == "faq":
+                default_body = FAQ_TEMPLATE
+            else:
+                default_body = ""
             body = st.text_area(
                 "Текст материала",
                 value=default_body,
@@ -339,17 +411,17 @@ def _table_editor_data(selected: dict) -> tuple[pd.DataFrame, dict]:
         if column.get("type") == "number":
             frame[column_id] = pd.to_numeric(frame[column_id], errors="coerce")
             config[column_id] = st.column_config.NumberColumn(
-                label, required=required, width="medium"
+                label, help=label, required=required, width="medium"
             )
         elif column.get("type") == "checkbox":
             frame[column_id] = frame[column_id].map(_checkbox_value).astype(bool)
             config[column_id] = st.column_config.CheckboxColumn(
-                label, width="small"
+                label, help=label, width="small"
             )
         else:
             frame[column_id] = frame[column_id].astype("string").fillna("")
             config[column_id] = st.column_config.TextColumn(
-                label, required=required, width="medium"
+                label, help=label, required=required, width="large"
             )
     return frame, config
 
@@ -590,6 +662,7 @@ def _render_table_data(selected: dict) -> None:
         edited = st.data_editor(
             frame,
             num_rows="dynamic",
+            row_height=TABLE_ROW_HEIGHT,
             width="stretch",
             hide_index=True,
             column_config=column_config,
@@ -705,7 +778,7 @@ def _render_archive(archived_items: list[dict], sections: list[dict]) -> None:
 
 
 def render_materials_admin() -> None:
-    """Показывает единый редактор статей, инструкций и таблиц."""
+    """Показывает единый редактор FAQ, статей, инструкций и таблиц."""
     sections = [
         section for section in load_sections() if not section.get("is_archived")
     ]
@@ -720,7 +793,7 @@ def render_materials_admin() -> None:
 
     st.title("🗂️ Управление материалами")
     st.caption(
-        "Выберите раздел и создайте статью, инструкцию или таблицу. "
+        "Выберите раздел и создайте FAQ, статью, инструкцию или таблицу. "
         "Опубликованные материалы появятся внутри выбранного раздела."
     )
     sections_col, items_col, published_col = st.columns(3)
