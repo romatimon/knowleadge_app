@@ -20,6 +20,7 @@ BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_LIMIT = 10
 
 CONTENT_ITEM_TYPES = ("faq", "article", "instruction", "table")
+MATERIAL_STATUSES = ("current", "review", "draft")
 SECTION_ITEM_TYPES = {
     "faq": ("faq", "article"),
     "reference_tables": ("table",),
@@ -344,6 +345,8 @@ def _create_content_schema(connection: sqlite3.Connection) -> None:
             keywords TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'current',
+            review_due_at TEXT NOT NULL DEFAULT '',
             position INTEGER NOT NULL DEFAULT 0,
             is_visible INTEGER NOT NULL DEFAULT 1,
             is_archived INTEGER NOT NULL DEFAULT 0,
@@ -353,6 +356,28 @@ def _create_content_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _content_columns(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(content_items)")
+    }
+
+
+def _upgrade_content_schema(connection: sqlite3.Connection) -> None:
+    """Добавляет поля актуальности в существующую базу без потери данных."""
+    columns = _content_columns(connection)
+    if "status" not in columns:
+        connection.execute(
+            "ALTER TABLE content_items "
+            "ADD COLUMN status TEXT NOT NULL DEFAULT 'current'"
+        )
+    if "review_due_at" not in columns:
+        connection.execute(
+            "ALTER TABLE content_items "
+            "ADD COLUMN review_due_at TEXT NOT NULL DEFAULT ''"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_content_items_section "
         "ON content_items(section_id, position)"
@@ -367,14 +392,19 @@ def _initialize_content() -> None:
             "SELECT 1 FROM sqlite_master WHERE type = 'table' "
             "AND name = 'content_items'"
         ).fetchone() is not None
+        columns = _content_columns(connection) if schema_exists else set()
 
-    if not schema_exists:
+    required_columns = {"status", "review_due_at"}
+    upgrade_required = schema_exists and not required_columns.issubset(columns)
+
+    if not schema_exists or upgrade_required:
         _create_backup()
 
     with closing(sqlite3.connect(SQLITE_PATH)) as connection:
         with connection:
             connection.execute("PRAGMA foreign_keys = ON")
             _create_content_schema(connection)
+            _upgrade_content_schema(connection)
 
 
 def _decode_json_list(value: str) -> list[Any]:
@@ -498,6 +528,9 @@ def save_content_item(item: Mapping[str, Any]) -> None:
         raise ValueError("Идентификатор, раздел и название материала обязательны.")
     if item_type not in CONTENT_ITEM_TYPES:
         raise ValueError("Неизвестный тип материала.")
+    status = str(item.get("status", "current")).strip() or "current"
+    if status not in MATERIAL_STATUSES:
+        raise ValueError("Неизвестный статус материала.")
 
     columns, rows = _normalize_table_content(
         item_id,
@@ -523,9 +556,9 @@ def save_content_item(item: Mapping[str, Any]) -> None:
                 """
                 INSERT INTO content_items (
                     id, section_id, item_type, title, summary, body, keywords,
-                    source, updated_at, position, is_visible, is_archived,
-                    table_columns_json, table_rows_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source, updated_at, status, review_due_at, position,
+                    is_visible, is_archived, table_columns_json, table_rows_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     section_id = excluded.section_id,
                     item_type = excluded.item_type,
@@ -535,6 +568,8 @@ def save_content_item(item: Mapping[str, Any]) -> None:
                     keywords = excluded.keywords,
                     source = excluded.source,
                     updated_at = excluded.updated_at,
+                    status = excluded.status,
+                    review_due_at = excluded.review_due_at,
                     position = excluded.position,
                     is_visible = excluded.is_visible,
                     is_archived = excluded.is_archived,
@@ -551,8 +586,10 @@ def save_content_item(item: Mapping[str, Any]) -> None:
                     str(item.get("keywords", "")).strip(),
                     str(item.get("source", "")).strip(),
                     str(item.get("updated_at", "")).strip(),
+                    status,
+                    str(item.get("review_due_at", "")).strip(),
                     int(item.get("position", 0)),
-                    int(bool(item.get("is_visible", True))),
+                    int(bool(item.get("is_visible", True)) and status != "draft"),
                     int(bool(item.get("is_archived", False))),
                     json.dumps(columns, ensure_ascii=False),
                     json.dumps(rows, ensure_ascii=False),

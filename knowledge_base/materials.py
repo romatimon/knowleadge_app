@@ -29,6 +29,19 @@ TYPE_LABELS = {
     "table": "Таблица",
 }
 
+STATUS_LABELS = {
+    "current": "Актуально",
+    "review": "Требует проверки",
+    "draft": "Черновик",
+}
+
+STATUS_MARKERS = {
+    "current": "",
+    "review": "⚠️",
+    "overdue": "⏰",
+    "draft": "📝",
+}
+
 COLUMN_TYPE_LABELS = {
     "text": "Текст",
     "number": "Число",
@@ -143,6 +156,27 @@ def _parse_date(value: str) -> date:
         return datetime.now(UTC).date()
 
 
+def _parse_optional_date(value: str) -> date | None:
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def material_relevance(item: dict, today: date | None = None) -> str:
+    """Возвращает фактическое состояние актуальности материала."""
+    status = str(item.get("status", "current"))
+    if status == "draft":
+        return "draft"
+    if status == "review":
+        return "review"
+
+    review_due = _parse_optional_date(str(item.get("review_due_at", "")))
+    if review_due and review_due <= (today or datetime.now(UTC).date()):
+        return "overdue"
+    return "current"
+
+
 def _columns_frame(columns: list[dict]) -> pd.DataFrame:
     """Готовит отдельный визуальный редактор структуры таблицы."""
     records = [
@@ -212,10 +246,28 @@ def _parse_columns_editor(frame: pd.DataFrame) -> tuple[list[dict], str | None]:
     return columns, None
 
 
-def _item_label(item: dict, section_by_id: dict[str, dict]) -> str:
+def _item_label(
+    item: dict,
+    section_by_id: dict[str, dict],
+    include_section: bool = True,
+) -> str:
     section = section_by_id.get(item.get("section_id"), {})
     type_label = TYPE_LABELS.get(item.get("item_type"), "Материал")
-    return f"{section.get('title', 'Без раздела')} → {item['title']} · {type_label}"
+    relevance = material_relevance(item)
+    marker = STATUS_MARKERS.get(relevance, "")
+    label = f"{marker} {item['title']} · {type_label}".strip()
+    if include_section:
+        return f"{section.get('title', 'Без раздела')} → {label}"
+    return label
+
+
+def _next_position(items: list[dict], section_id: str) -> int:
+    positions = [
+        int(item.get("position", 0))
+        for item in items
+        if item.get("section_id") == section_id
+    ]
+    return (max(positions) if positions else 0) + 10
 
 
 def _save_with_feedback(item: dict, message: str) -> bool:
@@ -232,26 +284,10 @@ def _render_settings_form(
     selected_id: str,
     selected: dict,
     item_type: str,
-    sections: list[dict],
+    section_id: str,
     active_items: list[dict],
 ) -> None:
-    section_by_id = {section["id"]: section for section in sections}
-    section_ids = [
-        section_id
-        for section_id, section in section_by_id.items()
-        if item_type in allowed_item_types(str(section.get("page_kind", "custom")))
-    ]
-    current_section_id = selected.get("section_id", section_ids[0])
-    if current_section_id not in section_ids:
-        current_section_id = section_ids[0]
-
     with st.form(f"material_form_{selected_id or 'new'}_{item_type}"):
-        section_id = st.selectbox(
-            "Раздел",
-            section_ids,
-            index=section_ids.index(current_section_id),
-            format_func=lambda value: section_by_id[value]["title"],
-        )
         title = st.text_input("Название", value=str(selected.get("title", "")))
         summary = st.text_area(
             "Краткое описание",
@@ -324,32 +360,61 @@ def _render_settings_form(
                 help="Можно использовать Markdown: заголовки, списки и выделение.",
             )
 
-        keywords = st.text_area(
-            "Ключевые слова для поиска",
-            value=str(selected.get("keywords", "")),
-            height=75,
-            placeholder="Синонимы и сокращения через точку с запятой",
-        )
-        source = st.text_input(
-            "Источник",
-            value=str(selected.get("source", "")),
-            placeholder="Документ, письмо или ссылка",
-        )
-        updated_at = st.date_input(
-            "Дата обновления",
-            value=_parse_date(str(selected.get("updated_at", ""))),
-        )
-        position = st.number_input(
-            "Порядок внутри раздела",
-            min_value=0,
-            step=10,
-            value=int(selected.get("position", (len(active_items) + 1) * 10)),
-        )
+        st.markdown("#### Актуальность")
+        relevance_col, review_col = st.columns(2)
+        with relevance_col:
+            status_ids = list(STATUS_LABELS)
+            current_status = str(selected.get("status", "current"))
+            if current_status not in status_ids:
+                current_status = "current"
+            status = st.selectbox(
+                "Статус",
+                status_ids,
+                index=status_ids.index(current_status),
+                format_func=lambda value: STATUS_LABELS[value],
+            )
+            updated_at = st.date_input(
+                "Проверено или обновлено",
+                value=_parse_date(str(selected.get("updated_at", ""))),
+            )
+        with review_col:
+            review_due_at = st.date_input(
+                "Проверить снова",
+                value=_parse_optional_date(
+                    str(selected.get("review_due_at", ""))
+                ),
+                help="Необязательно. В указанную дату появится предупреждение.",
+            )
         is_visible = st.checkbox(
             "Показывать сотрудникам",
             value=bool(selected.get("is_visible", True)),
+            help="Черновик не публикуется независимо от этой настройки.",
         )
-        submitted = st.form_submit_button("Сохранить настройки", type="primary")
+
+        with st.expander("Дополнительные настройки"):
+            keywords = st.text_area(
+                "Ключевые слова для поиска",
+                value=str(selected.get("keywords", "")),
+                height=75,
+                placeholder="Синонимы и сокращения через точку с запятой",
+            )
+            source = st.text_input(
+                "Источник",
+                value=str(selected.get("source", "")),
+                placeholder="Документ, письмо или ссылка",
+            )
+            position = st.number_input(
+                "Порядок внутри раздела",
+                min_value=0,
+                step=10,
+                value=int(
+                    selected.get(
+                        "position", _next_position(active_items, section_id)
+                    )
+                ),
+            )
+
+        submitted = st.form_submit_button("Сохранить материал", type="primary")
 
     if not submitted:
         return
@@ -400,13 +465,17 @@ def _render_settings_form(
             "keywords": keywords.strip(),
             "source": source.strip(),
             "updated_at": updated_at.isoformat(),
+            "status": status,
+            "review_due_at": (
+                review_due_at.isoformat() if review_due_at else ""
+            ),
             "position": int(position),
-            "is_visible": bool(is_visible),
+            "is_visible": bool(is_visible and status != "draft"),
             "is_archived": False,
             "table_columns": columns,
             "table_rows": clean_rows,
         }
-        if _save_with_feedback(values, "Настройки сохранены."):
+        if _save_with_feedback(values, "Материал сохранён."):
             st.rerun()
 
 
@@ -725,101 +794,56 @@ def _render_delete_action(selected_id: str) -> None:
 def _render_active_editor(sections: list[dict], active_items: list[dict]) -> None:
     section_by_id = {section["id"]: section for section in sections}
     section_ids = list(section_by_id)
-    type_ids = [
-        item_type
-        for item_type in TYPE_LABELS
-        if any(
-            item_type
-            in allowed_item_types(str(section.get("page_kind", "custom")))
-            for section in sections
-        )
-    ]
-
-    section_filter_col, type_filter_col = st.columns(2)
-    with section_filter_col:
-        section_filter = st.selectbox(
-            "Фильтр: раздел",
-            [""] + section_ids,
-            format_func=lambda value: (
-                "Все разделы" if not value else section_by_id[value]["title"]
-            ),
-            key="material_admin_section_filter",
-        )
-    filter_type_ids = (
-        list(
-            allowed_item_types(
-                str(section_by_id[section_filter].get("page_kind", "custom"))
-            )
-        )
-        if section_filter
-        else type_ids
+    section_id = st.selectbox(
+        "1. Выберите раздел",
+        section_ids,
+        format_func=lambda value: section_by_id[value]["title"],
+        key="material_admin_section",
     )
-    with type_filter_col:
-        type_filter = st.selectbox(
-            "Фильтр: тип",
-            [""] + filter_type_ids,
-            format_func=lambda value: (
-                "Все типы" if not value else TYPE_LABELS[value]
-            ),
-            key=f"material_admin_type_filter_{section_filter or 'all'}",
-        )
-
-    if section_filter:
-        allowed_labels = ", ".join(
-            TYPE_LABELS[item_type] for item_type in filter_type_ids
-        )
-        st.caption(
-            f"Для раздела «{section_by_id[section_filter]['title']}» доступны: "
-            f"{allowed_labels}."
-        )
-
-    filtered_items = [
-        item
-        for item in active_items
-        if (not section_filter or item.get("section_id") == section_filter)
-        and (not type_filter or item.get("item_type") == type_filter)
+    section = section_by_id[section_id]
+    allowed_types = list(
+        allowed_item_types(str(section.get("page_kind", "custom")))
+    )
+    section_items = [
+        item for item in active_items if item.get("section_id") == section_id
     ]
-    item_by_id = {item["id"]: item for item in filtered_items}
+    item_by_id = {item["id"]: item for item in section_items}
     options = [""] + list(item_by_id)
     selected_id = st.selectbox(
-        "Материал для редактирования",
+        "2. Выберите материал",
         options,
         format_func=lambda value: (
-            "＋ Новый материал"
+            "＋ Создать новый материал"
             if not value
-            else _item_label(item_by_id[value], section_by_id)
+            else _item_label(
+                item_by_id[value], section_by_id, include_section=False
+            )
         ),
-        key=(
-            f"material_admin_select_{section_filter or 'all'}_"
-            f"{type_filter or 'all'}"
-        ),
+        key=f"material_admin_select_{section_id}",
     )
-    selected = item_by_id.get(selected_id, {})
-    if not selected_id and section_filter:
-        selected = {"section_id": section_filter}
+    selected = item_by_id.get(selected_id, {"section_id": section_id})
 
-    new_type_ids = [type_filter] if type_filter else filter_type_ids
-    default_type = (
-        type_filter
-        or ("article" if "article" in new_type_ids else new_type_ids[0])
-    )
-    selected_type = selected.get("item_type", default_type)
-    editor_type_ids = [selected_type] if selected_id else new_type_ids
-    item_type = st.selectbox(
-        "Тип материала",
-        editor_type_ids,
-        index=editor_type_ids.index(selected_type),
-        format_func=lambda value: TYPE_LABELS[value],
-        key=f"material_type_{selected_id or 'new'}",
-        disabled=bool(selected_id),
-        help="После создания тип фиксируется, чтобы случайно не потерять данные.",
-    )
+    if selected_id:
+        item_type = str(selected["item_type"])
+        st.caption(f"Тип: {TYPE_LABELS[item_type]}")
+    elif len(allowed_types) == 1:
+        item_type = allowed_types[0]
+        st.caption(f"Будет создан материал типа «{TYPE_LABELS[item_type]}».")
+    else:
+        default_type = "article" if "article" in allowed_types else allowed_types[0]
+        item_type = st.selectbox(
+            "3. Выберите тип нового материала",
+            allowed_types,
+            index=allowed_types.index(default_type),
+            format_func=lambda value: TYPE_LABELS[value],
+            key=f"material_type_{section_id}",
+        )
 
     if item_type == "table":
-        settings_tab, data_tab = st.tabs(["Настройки", "Данные"])
+        settings_tab, data_tab = st.tabs(["Описание и колонки", "Данные"])
         with settings_tab:
             _render_settings_form(
-                selected_id, selected, item_type, sections, active_items
+                selected_id, selected, item_type, section_id, active_items
             )
         with data_tab:
             if selected_id:
@@ -828,7 +852,7 @@ def _render_active_editor(sections: list[dict], active_items: list[dict]) -> Non
                 st.info("Сначала настройте и сохраните новую таблицу.")
     else:
         _render_settings_form(
-            selected_id, selected, item_type, sections, active_items
+            selected_id, selected, item_type, section_id, active_items
         )
 
     if selected_id:
@@ -874,16 +898,33 @@ def render_materials_admin() -> None:
     archived_items = [item for item in items if item["is_archived"]]
 
     st.title("🗂️ Материалы")
-    st.caption(
-        "Сначала выберите рабочий раздел. Доступные формы зависят от его "
-        "назначения: FAQ, инструкция, справка или таблица."
-    )
-    sections_col, items_col, published_col = st.columns(3)
-    sections_col.metric("Разделы", len(sections))
-    items_col.metric("Материалы", len(active_items))
+    st.caption("Выберите раздел, затем создайте новый или откройте существующий материал.")
+
+    attention_items = [
+        item
+        for item in active_items
+        if material_relevance(item) in {"review", "overdue"}
+    ]
+    published_col, draft_col, review_col = st.columns(3)
     published_col.metric(
         "Опубликовано", sum(item["is_visible"] for item in active_items)
     )
+    draft_col.metric(
+        "Черновики",
+        sum(material_relevance(item) == "draft" for item in active_items),
+    )
+    review_col.metric("Требуют проверки", len(attention_items))
+
+    if attention_items:
+        section_by_id = {section["id"]: section for section in sections}
+        with st.expander(f"⚠️ Требуют проверки · {len(attention_items)}"):
+            for item in attention_items:
+                section_title = section_by_id.get(
+                    item.get("section_id"), {}
+                ).get("title", "Без раздела")
+                due = str(item.get("review_due_at", "")).strip()
+                due_text = f" — срок проверки {due}" if due else ""
+                st.markdown(f"- **{item['title']}** · {section_title}{due_text}")
 
     edit_tab, archive_tab = st.tabs(["Материалы", "Архив"])
     with edit_tab:

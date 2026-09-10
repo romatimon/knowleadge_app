@@ -8,6 +8,7 @@ import streamlit as st
 from knowledge_base.sections import render_sections_admin
 from knowledge_base.materials import (
     filter_content_items,
+    material_relevance,
     render_materials_admin,
     table_column_width,
 )
@@ -198,6 +199,16 @@ def render_content_items(items, search_query="", section_titles=None):
             expanded=bool(search_query.strip()),
         ):
             st.caption(type_labels.get(item.get("item_type"), "Материал"))
+            relevance = material_relevance(item)
+            if relevance == "overdue":
+                st.warning(
+                    "Срок проверки актуальности истёк. Перед использованием "
+                    "сверьте информацию с источником."
+                )
+            elif relevance == "review":
+                st.warning(
+                    "Материал отмечен как требующий проверки актуальности."
+                )
             if str(item.get("summary", "")).strip():
                 st.info(str(item["summary"]))
 
@@ -258,7 +269,9 @@ def render_content_items(items, search_query="", section_titles=None):
 
             metadata = []
             if str(item.get("updated_at", "")).strip():
-                metadata.append(f"Обновлено: {item['updated_at']}")
+                metadata.append(f"Проверено: {item['updated_at']}")
+            if str(item.get("review_due_at", "")).strip():
+                metadata.append(f"Следующая проверка: {item['review_due_at']}")
             if str(item.get("source", "")).strip():
                 metadata.append(f"Источник: {item['source']}")
             if metadata:
@@ -270,7 +283,7 @@ def render_section_materials(section_id, search_query):
     items = [
         item
         for item in load_content_items(section_id=section_id)
-        if item.get("is_visible", True)
+        if item.get("is_visible", True) and material_relevance(item) != "draft"
     ]
     filtered_items = filter_content_items(items, search_query)
     if not filtered_items:
@@ -294,7 +307,9 @@ def render_home_page():
         if section.get("is_visible", True)
     ]
     published_items = [
-        item for item in load_content_items() if item.get("is_visible", True)
+        item
+        for item in load_content_items()
+        if item.get("is_visible", True) and material_relevance(item) != "draft"
     ]
     section_titles = {section["id"]: section["title"] for section in sections}
 

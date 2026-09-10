@@ -1,5 +1,8 @@
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
+from datetime import date
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +17,7 @@ from knowledge_base.materials import (
     _parse_columns_editor,
     _read_table_file,
     filter_content_items,
+    material_relevance,
     table_column_width,
 )
 from streamlit.testing.v1 import AppTest
@@ -87,13 +91,24 @@ class MaterialTests(unittest.TestCase):
             }
         )
         page = AppTest.from_function(render_materials_test_page).run(timeout=30)
-        table_id = storage.load_content_items()[0]["id"]
+        section_selector = next(
+            item
+            for item in page.selectbox
+            if item.label == "1. Выберите раздел"
+        )
+        section_selector.select("Матрицы, нормы и сроки")
+        page.run(timeout=30)
         material_selector = next(
             item
             for item in page.selectbox
-            if item.label == "Материал для редактирования"
+            if item.label == "2. Выберите материал"
         )
-        material_selector.select(table_id)
+        table_option = next(
+            option
+            for option in material_selector.options
+            if "Новая таблица" in option
+        )
+        material_selector.select(table_option)
         page.run(timeout=30)
 
         self.assertEqual(list(page.exception), [])
@@ -165,6 +180,82 @@ class MaterialTests(unittest.TestCase):
                     "table_columns": ["Колонка"],
                 }
             )
+
+    def test_draft_is_never_published(self):
+        storage.save_content_item(
+            {
+                "id": "draft-faq",
+                "section_id": "faq",
+                "item_type": "faq",
+                "title": "Черновик ответа",
+                "body": "Текст",
+                "status": "draft",
+                "is_visible": True,
+            }
+        )
+
+        draft = storage.load_content_items()[0]
+        self.assertEqual(draft["status"], "draft")
+        self.assertFalse(draft["is_visible"])
+
+    def test_relevance_uses_status_and_review_date(self):
+        today = date(2026, 9, 10)
+
+        self.assertEqual(material_relevance({"status": "draft"}, today), "draft")
+        self.assertEqual(material_relevance({"status": "review"}, today), "review")
+        self.assertEqual(
+            material_relevance(
+                {"status": "current", "review_due_at": "2026-09-10"},
+                today,
+            ),
+            "overdue",
+        )
+        self.assertEqual(
+            material_relevance(
+                {"status": "current", "review_due_at": "2026-10-01"},
+                today,
+            ),
+            "current",
+        )
+
+    def test_old_content_schema_is_upgraded_without_losing_item(self):
+        storage.load_sections()
+        with closing(sqlite3.connect(storage.SQLITE_PATH)) as connection:
+            connection.execute(
+                """
+                CREATE TABLE content_items (
+                    id TEXT PRIMARY KEY,
+                    section_id TEXT NOT NULL,
+                    item_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    body TEXT NOT NULL DEFAULT '',
+                    keywords TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT '',
+                    position INTEGER NOT NULL DEFAULT 0,
+                    is_visible INTEGER NOT NULL DEFAULT 1,
+                    is_archived INTEGER NOT NULL DEFAULT 0,
+                    table_columns_json TEXT NOT NULL DEFAULT '[]',
+                    table_rows_json TEXT NOT NULL DEFAULT '[]'
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO content_items (
+                    id, section_id, item_type, title, body
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                ("old-item", "faq", "faq", "Старый материал", "Содержимое"),
+            )
+            connection.commit()
+
+        item = storage.load_content_items()[0]
+        self.assertEqual(item["title"], "Старый материал")
+        self.assertEqual(item["body"], "Содержимое")
+        self.assertEqual(item["status"], "current")
+        self.assertEqual(item["review_due_at"], "")
 
     def test_search_filters_rows_inside_new_table(self):
         item = {
