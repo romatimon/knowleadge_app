@@ -19,69 +19,115 @@ SQLITE_PATH = DATA_DIR / "knowledge.db"
 BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_LIMIT = 10
 
-CONTENT_ITEM_TYPES = ("faq", "article", "instruction", "table")
+CONTENT_ITEM_TYPES = (
+    "faq",
+    "article",
+    "instruction",
+    "template",
+    "checklist",
+    "table",
+)
 MATERIAL_STATUSES = ("current", "review", "draft")
 SECTION_ITEM_TYPES = {
     "faq": ("faq", "article"),
     "reference_tables": ("table",),
     "instructions": ("instruction",),
     "reference": ("article", "table"),
-    "templates": ("article", "instruction"),
+    "templates": ("template", "checklist", "article", "instruction"),
 }
 
-SECTION_CATALOG_MIGRATION = "2026-09-section-catalog-v1"
+SECTION_CATALOG_MIGRATION = "2026-09-final-workflow-sections-v1"
+BRANCH_CATALOG_MIGRATION = "2026-09-final-workflow-branches-v1"
+CONTENT_STRUCTURE_MIGRATION = "2026-09-workflow-content-v1"
+LEGACY_SECTION_CLEANUP_MIGRATION = "2026-09-workflow-cleanup-v1"
 
 DEFAULT_SECTIONS = (
     {
-        "id": "faq",
-        "title": "FAQ и рабочие ситуации",
-        "icon": "❓",
-        "description": "Короткие ответы, реальные случаи, отказы, правила и исключения.",
-        "page_kind": "faq",
+        "id": "client",
+        "title": "Работа с клиентом",
+        "icon": "📁",
+        "description": "Квалификация запроса, красные флаги и FAQ.",
+        "page_kind": "custom",
         "position": 10,
         "is_visible": True,
         "is_archived": False,
     },
     {
-        "id": "instructions",
-        "title": "Инструкции и алгоритмы",
-        "icon": "🧭",
-        "description": "Пошаговые действия, проверки и внутренние рабочие процессы.",
-        "page_kind": "instructions",
+        "id": "documents",
+        "title": "Оформление документов",
+        "icon": "📁",
+        "description": "Макет заявка, ФГИС и особые процедуры оформления.",
+        "page_kind": "custom",
         "position": 20,
         "is_visible": True,
         "is_archived": False,
     },
     {
-        "id": "reference_tables",
-        "title": "Матрицы, нормы и сроки",
-        "icon": "📊",
-        "description": "Продуктовые матрицы, схемы оценки, сроки и нормы в таблицах.",
-        "page_kind": "reference_tables",
+        "id": "testing",
+        "title": "Испытания и образцы",
+        "icon": "📁",
+        "description": "Отбор, ввоз, лаборатории, АСП, протоколы испытаний, матрицы и нормы.",
+        "page_kind": "custom",
         "position": 30,
         "is_visible": True,
         "is_archived": False,
     },
     {
-        "id": "reference",
-        "title": "Справочник и нормативная база",
-        "icon": "📚",
-        "description": "Регламенты, определения, сокращения, лаборатории и органы.",
-        "page_kind": "reference",
+        "id": "support",
+        "title": "Сопровождение",
+        "icon": "📁",
+        "description": "Инспекционный контроль, переоформление, дореализация, нормы и сроки.",
+        "page_kind": "custom",
         "position": 40,
         "is_visible": True,
         "is_archived": False,
     },
     {
-        "id": "templates",
-        "title": "Шаблоны и чек-листы",
-        "icon": "✅",
-        "description": "Макеты документов и списки самопроверки перед подачей.",
-        "page_kind": "templates",
+        "id": "reference",
+        "title": "Справочник и внутренние процессы",
+        "icon": "📁",
+        "description": "Термины, регламенты, схемы и передача дел.",
+        "page_kind": "custom",
         "position": 50,
         "is_visible": True,
         "is_archived": False,
     },
+)
+
+LEGACY_SECTION_IDS = (
+    "faq",
+    "instructions",
+    "reference_tables",
+    "templates",
+    "internal",
+)
+LEGACY_BRANCH_IDS = (
+    "internal-instructions",
+    "reference-basics",
+    "reference-terms",
+    "reference-schemes",
+    "reference-periods",
+)
+
+STANDARD_BRANCHES = (
+    ("instructions", "Инструкции", "instruction", "Пошаговые алгоритмы.", 10),
+    ("templates", "Шаблоны", "template", "Письма, бланки и акты.", 20),
+    ("faq", "FAQ", "faq", "Короткие ответы на рабочие вопросы.", 30),
+    ("checklists", "Чек-листы", "checklist", "Проверки перед выполнением действия.", 40),
+    ("tables", "Матрицы и нормы", "table", "Таблицы, сроки и нормативные значения.", 50),
+)
+
+DEFAULT_BRANCHES = tuple(
+    (
+        f"{section['id']}-{branch_id}",
+        section["id"],
+        title,
+        branch_kind,
+        description,
+        position,
+    )
+    for section in DEFAULT_SECTIONS
+    for branch_id, title, branch_kind, description, position in STANDARD_BRANCHES
 )
 
 
@@ -186,6 +232,11 @@ def _apply_section_catalog_migration(connection: sqlite3.Connection) -> None:
                 int(section["is_archived"]),
             ),
         )
+
+    connection.executemany(
+        "UPDATE content_sections SET is_visible = 0, is_archived = 1 WHERE id = ?",
+        [(section_id,) for section_id in LEGACY_SECTION_IDS],
+    )
 
     connection.execute(
         "INSERT INTO app_migrations (id, applied_at) VALUES (?, ?)",
@@ -332,12 +383,261 @@ def restore_section(section_id: str) -> None:
             )
 
 
+def _create_branches_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS content_branches (
+            id TEXT PRIMARY KEY,
+            section_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            branch_kind TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            position INTEGER NOT NULL DEFAULT 0,
+            is_visible INTEGER NOT NULL DEFAULT 1,
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(section_id) REFERENCES content_sections(id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_content_branches_section "
+        "ON content_branches(section_id, position)"
+    )
+
+
+def _apply_branch_catalog_migration(connection: sqlite3.Connection) -> None:
+    """Один раз создаёт рекомендуемые ветки рабочего каркаса."""
+    applied = connection.execute(
+        "SELECT 1 FROM app_migrations WHERE id = ?",
+        (BRANCH_CATALOG_MIGRATION,),
+    ).fetchone()
+    if applied:
+        return
+
+    connection.executemany(
+        """
+        INSERT INTO content_branches (
+            id, section_id, title, branch_kind, description, position,
+            is_visible, is_archived
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, 0)
+        ON CONFLICT(id) DO NOTHING
+        """,
+        DEFAULT_BRANCHES,
+    )
+    content_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'content_items'"
+    ).fetchone() is not None
+    if content_exists and "branch_id" in _content_columns(connection):
+        connection.executemany(
+            "UPDATE content_items SET branch_id = '' WHERE branch_id = ?",
+            [(branch_id,) for branch_id in LEGACY_BRANCH_IDS],
+        )
+    connection.executemany(
+        "DELETE FROM content_branches WHERE id = ?",
+        [(branch_id,) for branch_id in LEGACY_BRANCH_IDS],
+    )
+    connection.execute(
+        "INSERT INTO app_migrations (id, applied_at) VALUES (?, ?)",
+        (BRANCH_CATALOG_MIGRATION, datetime.now(UTC).isoformat()),
+    )
+
+
+def _initialize_branches() -> None:
+    """Создаёт управляемый уровень веток внутри разделов."""
+    _initialize_sections()
+    with closing(sqlite3.connect(SQLITE_PATH)) as connection:
+        schema_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'content_branches'"
+        ).fetchone() is not None
+        migration_applied = connection.execute(
+            "SELECT 1 FROM app_migrations WHERE id = ?",
+            (BRANCH_CATALOG_MIGRATION,),
+        ).fetchone() is not None
+
+    if not schema_exists or not migration_applied:
+        _create_backup()
+
+    with closing(sqlite3.connect(SQLITE_PATH)) as connection:
+        with connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            _create_branches_schema(connection)
+            _create_migrations_schema(connection)
+            _apply_branch_catalog_migration(connection)
+
+
+def load_branches(
+    section_id: str | None = None,
+    include_archived: bool = False,
+) -> list[dict[str, Any]]:
+    """Возвращает ветки одного раздела или всей базы знаний."""
+    _initialize_branches()
+    conditions = []
+    parameters: list[Any] = []
+    if section_id:
+        conditions.append("section_id = ?")
+        parameters.append(section_id)
+    if not include_archived:
+        conditions.append("is_archived = 0")
+
+    query = "SELECT * FROM content_branches"
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY section_id, position, title COLLATE NOCASE"
+
+    with closing(sqlite3.connect(SQLITE_PATH)) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(query, parameters).fetchall()
+        return [
+            {
+                **dict(row),
+                "is_visible": bool(row["is_visible"]),
+                "is_archived": bool(row["is_archived"]),
+            }
+            for row in rows
+        ]
+
+
+def save_branch(branch: Mapping[str, Any]) -> None:
+    """Создаёт или обновляет ветку внутри раздела."""
+    branch_id = str(branch.get("id", "")).strip()
+    section_id = str(branch.get("section_id", "")).strip()
+    title = str(branch.get("title", "")).strip()
+    branch_kind = str(branch.get("branch_kind", "")).strip()
+    if not branch_id or not section_id or not title:
+        raise ValueError("Идентификатор, раздел и название ветки обязательны.")
+    if branch_kind not in CONTENT_ITEM_TYPES:
+        raise ValueError("Неизвестный тип ветки.")
+
+    _initialize_branches()
+    _create_backup()
+    with closing(sqlite3.connect(SQLITE_PATH)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        if connection.execute(
+            "SELECT 1 FROM content_sections WHERE id = ? AND is_archived = 0",
+            (section_id,),
+        ).fetchone() is None:
+            raise ValueError("Выбранный раздел не существует или находится в архиве.")
+        duplicate = connection.execute(
+            "SELECT 1 FROM content_branches "
+            "WHERE section_id = ? AND id <> ? AND is_archived = 0 "
+            "AND title = ? COLLATE NOCASE",
+            (section_id, branch_id, title),
+        ).fetchone()
+        if duplicate:
+            raise ValueError("В этом разделе уже есть ветка с таким названием.")
+
+        content_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'content_items'"
+        ).fetchone() is not None
+        content_columns = _content_columns(connection) if content_exists else set()
+        if "branch_id" in content_columns:
+            incompatible = connection.execute(
+                "SELECT 1 FROM content_items WHERE branch_id = ? "
+                "AND is_archived = 0 AND item_type <> ? LIMIT 1",
+                (branch_id, branch_kind),
+            ).fetchone()
+            if incompatible:
+                raise ValueError(
+                    "Тип ветки нельзя изменить, пока в ней находятся материалы."
+                )
+
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO content_branches (
+                    id, section_id, title, branch_kind, description, position,
+                    is_visible, is_archived
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    section_id = excluded.section_id,
+                    title = excluded.title,
+                    branch_kind = excluded.branch_kind,
+                    description = excluded.description,
+                    position = excluded.position,
+                    is_visible = excluded.is_visible,
+                    is_archived = excluded.is_archived
+                """,
+                (
+                    branch_id,
+                    section_id,
+                    title,
+                    branch_kind,
+                    str(branch.get("description", "")).strip(),
+                    int(branch.get("position", 0)),
+                    int(bool(branch.get("is_visible", True))),
+                    int(bool(branch.get("is_archived", False))),
+                ),
+            )
+
+
+def archive_branch(branch_id: str) -> None:
+    """Перемещает пустую ветку в архив."""
+    _initialize_branches()
+    with closing(sqlite3.connect(SQLITE_PATH)) as connection:
+        content_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'content_items'"
+        ).fetchone() is not None
+        content_columns = _content_columns(connection) if content_exists else set()
+        if "branch_id" in content_columns:
+            assigned = connection.execute(
+                "SELECT COUNT(*) FROM content_items "
+                "WHERE branch_id = ? AND is_archived = 0",
+                (branch_id,),
+            ).fetchone()[0]
+            if assigned:
+                raise ValueError(
+                    "Сначала перенесите материалы ветки или оставьте их без ветки."
+                )
+
+    _create_backup()
+    with closing(sqlite3.connect(SQLITE_PATH)) as connection:
+        with connection:
+            connection.execute(
+                "UPDATE content_branches SET is_visible = 0, is_archived = 1 "
+                "WHERE id = ?",
+                (branch_id,),
+            )
+
+
+def restore_branch(branch_id: str) -> None:
+    """Возвращает ветку из архива."""
+    _initialize_branches()
+    with closing(sqlite3.connect(SQLITE_PATH)) as connection:
+        branch = connection.execute(
+            "SELECT section_id, title FROM content_branches WHERE id = ?",
+            (branch_id,),
+        ).fetchone()
+        if branch is None:
+            raise ValueError("Ветка не найдена.")
+        duplicate = connection.execute(
+            "SELECT 1 FROM content_branches "
+            "WHERE section_id = ? AND id <> ? AND is_archived = 0 "
+            "AND title = ? COLLATE NOCASE",
+            (branch[0], branch_id, branch[1]),
+        ).fetchone()
+        if duplicate:
+            raise ValueError("В разделе уже есть активная ветка с таким названием.")
+
+    _create_backup()
+    with closing(sqlite3.connect(SQLITE_PATH)) as connection:
+        with connection:
+            connection.execute(
+                "UPDATE content_branches SET is_archived = 0 WHERE id = ?",
+                (branch_id,),
+            )
+
+
 def _create_content_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS content_items (
             id TEXT PRIMARY KEY,
             section_id TEXT NOT NULL,
+            branch_id TEXT NOT NULL DEFAULT '',
             item_type TEXT NOT NULL,
             title TEXT NOT NULL,
             summary TEXT NOT NULL DEFAULT '',
@@ -348,6 +648,7 @@ def _create_content_schema(connection: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'current',
             review_due_at TEXT NOT NULL DEFAULT '',
             position INTEGER NOT NULL DEFAULT 0,
+            is_featured INTEGER NOT NULL DEFAULT 0,
             is_visible INTEGER NOT NULL DEFAULT 1,
             is_archived INTEGER NOT NULL DEFAULT 0,
             table_columns_json TEXT NOT NULL DEFAULT '[]',
@@ -368,6 +669,11 @@ def _content_columns(connection: sqlite3.Connection) -> set[str]:
 def _upgrade_content_schema(connection: sqlite3.Connection) -> None:
     """Добавляет поля актуальности в существующую базу без потери данных."""
     columns = _content_columns(connection)
+    if "branch_id" not in columns:
+        connection.execute(
+            "ALTER TABLE content_items "
+            "ADD COLUMN branch_id TEXT NOT NULL DEFAULT ''"
+        )
     if "status" not in columns:
         connection.execute(
             "ALTER TABLE content_items "
@@ -378,26 +684,113 @@ def _upgrade_content_schema(connection: sqlite3.Connection) -> None:
             "ALTER TABLE content_items "
             "ADD COLUMN review_due_at TEXT NOT NULL DEFAULT ''"
         )
+    if "is_featured" not in columns:
+        connection.execute(
+            "ALTER TABLE content_items "
+            "ADD COLUMN is_featured INTEGER NOT NULL DEFAULT 0"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_content_items_section "
         "ON content_items(section_id, position)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_content_items_branch "
+        "ON content_items(branch_id, position)"
+    )
+
+
+def _apply_content_structure_migration(connection: sqlite3.Connection) -> None:
+    """Распределяет материалы старого каркаса, не меняя их содержимое."""
+    applied = connection.execute(
+        "SELECT 1 FROM app_migrations WHERE id = ?",
+        (CONTENT_STRUCTURE_MIGRATION,),
+    ).fetchone()
+    if applied:
+        return
+
+    connection.execute(
+        "UPDATE content_items SET section_id = 'documents', "
+        "branch_id = 'documents-faq', item_type = 'faq' "
+        "WHERE section_id = 'faq'"
+    )
+    connection.execute(
+        "UPDATE content_items SET section_id = 'documents', "
+        "branch_id = 'documents-instructions', item_type = 'instruction' "
+        "WHERE section_id = 'instructions'"
+    )
+    connection.execute(
+        "UPDATE content_items SET section_id = 'testing', "
+        "branch_id = 'testing-tables', item_type = 'table' "
+        "WHERE section_id = 'reference_tables'"
+    )
+    connection.execute(
+        "UPDATE content_items SET section_id = 'reference', branch_id = '' "
+        "WHERE branch_id = 'testing-tables' AND title LIKE ?",
+        ("%Сроки действия%",),
+    )
+    connection.execute(
+        "UPDATE content_items SET section_id = 'documents', "
+        "branch_id = 'documents-templates', item_type = 'template' "
+        "WHERE section_id = 'templates'"
+    )
+    connection.execute(
+        "INSERT INTO app_migrations (id, applied_at) VALUES (?, ?)",
+        (CONTENT_STRUCTURE_MIGRATION, datetime.now(UTC).isoformat()),
+    )
+
+
+def _apply_legacy_section_cleanup(connection: sqlite3.Connection) -> None:
+    """Удаляет только опустевшие системные разделы прежнего каркаса."""
+    applied = connection.execute(
+        "SELECT 1 FROM app_migrations WHERE id = ?",
+        (LEGACY_SECTION_CLEANUP_MIGRATION,),
+    ).fetchone()
+    if applied:
+        return
+
+    for section_id in LEGACY_SECTION_IDS:
+        connection.execute(
+            "DELETE FROM content_sections WHERE id = ? "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM content_items WHERE section_id = ?"
+            ") AND NOT EXISTS ("
+            "SELECT 1 FROM content_branches WHERE section_id = ?"
+            ")",
+            (section_id, section_id, section_id),
+        )
+    connection.execute(
+        "INSERT INTO app_migrations (id, applied_at) VALUES (?, ?)",
+        (LEGACY_SECTION_CLEANUP_MIGRATION, datetime.now(UTC).isoformat()),
     )
 
 
 def _initialize_content() -> None:
     """Создаёт универсальное хранилище материалов при первом обращении."""
-    _initialize_sections()
+    _initialize_branches()
     with closing(sqlite3.connect(SQLITE_PATH)) as connection:
         schema_exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' "
             "AND name = 'content_items'"
         ).fetchone() is not None
         columns = _content_columns(connection) if schema_exists else set()
+        migration_applied = connection.execute(
+            "SELECT 1 FROM app_migrations WHERE id = ?",
+            (CONTENT_STRUCTURE_MIGRATION,),
+        ).fetchone() is not None
+        cleanup_applied = connection.execute(
+            "SELECT 1 FROM app_migrations WHERE id = ?",
+            (LEGACY_SECTION_CLEANUP_MIGRATION,),
+        ).fetchone() is not None
 
-    required_columns = {"status", "review_due_at"}
+    required_columns = {"branch_id", "status", "review_due_at", "is_featured"}
     upgrade_required = schema_exists and not required_columns.issubset(columns)
 
-    if not schema_exists or upgrade_required:
+    if (
+        not schema_exists
+        or upgrade_required
+        or not migration_applied
+        or not cleanup_applied
+    ):
         _create_backup()
 
     with closing(sqlite3.connect(SQLITE_PATH)) as connection:
@@ -405,6 +798,8 @@ def _initialize_content() -> None:
             connection.execute("PRAGMA foreign_keys = ON")
             _create_content_schema(connection)
             _upgrade_content_schema(connection)
+            _apply_content_structure_migration(connection)
+            _apply_legacy_section_cleanup(connection)
 
 
 def _decode_json_list(value: str) -> list[Any]:
@@ -478,6 +873,7 @@ def _normalize_table_content(
 
 def load_content_items(
     section_id: str | None = None,
+    branch_id: str | None = None,
     include_archived: bool = False,
 ) -> list[dict[str, Any]]:
     """Загружает статьи, инструкции и произвольные таблицы."""
@@ -485,15 +881,25 @@ def load_content_items(
     conditions = []
     parameters: list[Any] = []
     if section_id:
-        conditions.append("section_id = ?")
+        conditions.append("ci.section_id = ?")
         parameters.append(section_id)
+    if branch_id is not None:
+        conditions.append("ci.branch_id = ?")
+        parameters.append(branch_id)
     if not include_archived:
-        conditions.append("is_archived = 0")
+        conditions.append("ci.is_archived = 0")
 
-    query = "SELECT * FROM content_items"
+    query = (
+        "SELECT ci.*, COALESCE(cb.title, '') AS branch_title, "
+        "COALESCE(cb.branch_kind, '') AS branch_kind, "
+        "COALESCE(cb.is_visible, 0) AS branch_is_visible, "
+        "COALESCE(cb.is_archived, 0) AS branch_is_archived "
+        "FROM content_items AS ci "
+        "LEFT JOIN content_branches AS cb ON cb.id = ci.branch_id"
+    )
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY position, title COLLATE NOCASE"
+    query += " ORDER BY ci.position, ci.title COLLATE NOCASE"
 
     with closing(sqlite3.connect(SQLITE_PATH)) as connection:
         connection.row_factory = sqlite3.Row
@@ -509,6 +915,9 @@ def load_content_items(
             items.append(
                 {
                     **values,
+                    "is_featured": bool(row["is_featured"]),
+                    "branch_is_visible": bool(row["branch_is_visible"]),
+                    "branch_is_archived": bool(row["branch_is_archived"]),
                     "is_visible": bool(row["is_visible"]),
                     "is_archived": bool(row["is_archived"]),
                     "table_columns": columns,
@@ -522,6 +931,7 @@ def save_content_item(item: Mapping[str, Any]) -> None:
     """Создаёт или обновляет материал после резервного копирования."""
     item_id = str(item.get("id", "")).strip()
     section_id = str(item.get("section_id", "")).strip()
+    branch_id = str(item.get("branch_id", "")).strip()
     item_type = str(item.get("item_type", "")).strip()
     title = str(item.get("title", "")).strip()
     if not item_id or not section_id or not title:
@@ -550,17 +960,29 @@ def save_content_item(item: Mapping[str, Any]) -> None:
             raise ValueError("Выбранный раздел не существует.")
         if item_type not in allowed_item_types(str(section_row[0])):
             raise ValueError("Этот тип материала нельзя сохранять в выбранном разделе.")
+        if branch_id:
+            branch_row = connection.execute(
+                "SELECT branch_kind FROM content_branches "
+                "WHERE id = ? AND section_id = ? AND is_archived = 0",
+                (branch_id, section_id),
+            ).fetchone()
+            if branch_row is None:
+                raise ValueError("Выбранная ветка не относится к этому разделу.")
+            if str(branch_row[0]) != item_type:
+                raise ValueError("Тип материала не соответствует типу выбранной ветки.")
 
         with connection:
             connection.execute(
                 """
                 INSERT INTO content_items (
-                    id, section_id, item_type, title, summary, body, keywords,
+                    id, section_id, branch_id, item_type, title, summary, body, keywords,
                     source, updated_at, status, review_due_at, position,
-                    is_visible, is_archived, table_columns_json, table_rows_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_featured, is_visible, is_archived,
+                    table_columns_json, table_rows_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     section_id = excluded.section_id,
+                    branch_id = excluded.branch_id,
                     item_type = excluded.item_type,
                     title = excluded.title,
                     summary = excluded.summary,
@@ -571,6 +993,7 @@ def save_content_item(item: Mapping[str, Any]) -> None:
                     status = excluded.status,
                     review_due_at = excluded.review_due_at,
                     position = excluded.position,
+                    is_featured = excluded.is_featured,
                     is_visible = excluded.is_visible,
                     is_archived = excluded.is_archived,
                     table_columns_json = excluded.table_columns_json,
@@ -579,6 +1002,7 @@ def save_content_item(item: Mapping[str, Any]) -> None:
                 (
                     item_id,
                     section_id,
+                    branch_id,
                     item_type,
                     title,
                     str(item.get("summary", "")).strip(),
@@ -589,6 +1013,7 @@ def save_content_item(item: Mapping[str, Any]) -> None:
                     status,
                     str(item.get("review_due_at", "")).strip(),
                     int(item.get("position", 0)),
+                    int(bool(item.get("is_featured", False))),
                     int(bool(item.get("is_visible", True)) and status != "draft"),
                     int(bool(item.get("is_archived", False))),
                     json.dumps(columns, ensure_ascii=False),

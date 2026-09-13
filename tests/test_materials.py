@@ -10,13 +10,17 @@ from unittest.mock import patch
 import pandas as pd
 import storage
 from knowledge_base.materials import (
+    TEXT_MATERIAL_TEMPLATE,
     _columns_frame,
     _display_table_frame,
     _excel_bytes,
+    _markdown_bytes,
     _map_import_rows,
     _parse_columns_editor,
+    _read_markdown_file,
     _read_table_file,
     filter_content_items,
+    is_public_material,
     material_relevance,
     table_column_width,
 )
@@ -46,10 +50,21 @@ class MaterialTests(unittest.TestCase):
             active_patch.stop()
         self.temp_dir.cleanup()
 
+    def test_text_material_template_uses_common_structure(self):
+        for heading in (
+            "## 🎯 Назначение",
+            "## 📌 Основные блоки",
+            "## ⚙️ Алгоритмы",
+            "## ⚠️ Важно",
+            "## 📚 Справочная информация",
+        ):
+            self.assertIn(heading, TEXT_MATERIAL_TEMPLATE)
+
     def test_table_round_trip_and_archive(self):
         item = {
             "id": "sampling-table",
-            "section_id": "reference_tables",
+            "section_id": "testing",
+            "branch_id": "testing-tables",
             "item_type": "table",
             "title": "Нормы отбора",
             "summary": "Количество образцов",
@@ -65,7 +80,7 @@ class MaterialTests(unittest.TestCase):
         }
         storage.save_content_item(item)
 
-        loaded = storage.load_content_items(section_id="reference_tables")
+        loaded = storage.load_content_items(section_id="testing")
         columns = loaded[0]["table_columns"]
         self.assertEqual(
             [column["label"] for column in columns], item["table_columns"]
@@ -83,7 +98,8 @@ class MaterialTests(unittest.TestCase):
         storage.save_content_item(
             {
                 "id": "empty-table",
-                "section_id": "reference_tables",
+                "section_id": "testing",
+                "branch_id": "testing-tables",
                 "item_type": "table",
                 "title": "Новая таблица",
                 "table_columns": ["Продукция", "Срок"],
@@ -96,12 +112,19 @@ class MaterialTests(unittest.TestCase):
             for item in page.selectbox
             if item.label == "1. Выберите раздел"
         )
-        section_selector.select("Матрицы, нормы и сроки")
+        section_selector.select("Испытания и образцы")
+        page.run(timeout=30)
+        branch_selector = next(
+            item
+            for item in page.selectbox
+            if item.label == "2. Выберите ветку"
+        )
+        branch_selector.select("Матрицы и нормы")
         page.run(timeout=30)
         material_selector = next(
             item
             for item in page.selectbox
-            if item.label == "2. Выберите материал"
+            if item.label == "3. Выберите материал"
         )
         table_option = next(
             option
@@ -122,7 +145,8 @@ class MaterialTests(unittest.TestCase):
         storage.save_content_item(
             {
                 "id": "rename-table",
-                "section_id": "reference_tables",
+                "section_id": "testing",
+                "branch_id": "testing-tables",
                 "item_type": "table",
                 "title": "Проверка переименования",
                 "table_columns": ["Продукция"],
@@ -147,7 +171,8 @@ class MaterialTests(unittest.TestCase):
         storage.save_content_item(
             {
                 "id": "faq-sample",
-                "section_id": "faq",
+                "section_id": "documents",
+                "branch_id": "documents-faq",
                 "item_type": "faq",
                 "title": "Что делать в рабочей ситуации?",
                 "summary": "Краткий ответ сотруднику",
@@ -156,7 +181,7 @@ class MaterialTests(unittest.TestCase):
             }
         )
 
-        item = storage.load_content_items(section_id="faq")[0]
+        item = storage.load_content_items(section_id="documents")[0]
 
         self.assertEqual(item["item_type"], "faq")
         self.assertIn("Проверить документы", item["body"])
@@ -167,14 +192,23 @@ class MaterialTests(unittest.TestCase):
         self.assertEqual(storage.allowed_item_types("instructions"), ("instruction",))
         self.assertEqual(storage.allowed_item_types("reference"), ("article", "table"))
         self.assertEqual(
-            storage.allowed_item_types("templates"), ("article", "instruction")
+            storage.allowed_item_types("templates"),
+            ("template", "checklist", "article", "instruction"),
+        )
+
+        storage.save_section(
+            {
+                "id": "faq-only",
+                "title": "Только FAQ",
+                "page_kind": "faq",
+            }
         )
 
         with self.assertRaisesRegex(ValueError, "нельзя сохранять"):
             storage.save_content_item(
                 {
                     "id": "wrong-table",
-                    "section_id": "faq",
+                    "section_id": "faq-only",
                     "item_type": "table",
                     "title": "Таблица не в том разделе",
                     "table_columns": ["Колонка"],
@@ -185,7 +219,8 @@ class MaterialTests(unittest.TestCase):
         storage.save_content_item(
             {
                 "id": "draft-faq",
-                "section_id": "faq",
+                "section_id": "documents",
+                "branch_id": "documents-faq",
                 "item_type": "faq",
                 "title": "Черновик ответа",
                 "body": "Текст",
@@ -256,6 +291,64 @@ class MaterialTests(unittest.TestCase):
         self.assertEqual(item["body"], "Содержимое")
         self.assertEqual(item["status"], "current")
         self.assertEqual(item["review_due_at"], "")
+        self.assertEqual(item["branch_id"], "documents-faq")
+        self.assertFalse(item["is_featured"])
+
+    def test_markdown_import_and_export(self):
+        content = (
+            "---\n"
+            "title: Проверка макета\n"
+            "summary: Краткая памятка\n"
+            "keywords: макет; проверка\n"
+            "source: Внутренняя инструкция\n"
+            "---\n\n"
+            "## Что делать\n\n1. Проверить сведения.\n"
+        ).encode("utf-8")
+
+        imported = _read_markdown_file("layout-check.md", content)
+        exported = _markdown_bytes({**imported, "status": "current"}).decode("utf-8")
+
+        self.assertEqual(imported["title"], "Проверка макета")
+        self.assertIn("Проверить сведения", imported["body"])
+        self.assertIn("title: Проверка макета", exported)
+        self.assertIn("## Что делать", exported)
+
+    def test_branch_type_must_match_material_type(self):
+        with self.assertRaisesRegex(ValueError, "не соответствует"):
+            storage.save_content_item(
+                {
+                    "id": "wrong-branch-type",
+                    "section_id": "documents",
+                    "branch_id": "documents-checklists",
+                    "item_type": "instruction",
+                    "title": "Материал неверного типа",
+                    "body": "Текст",
+                }
+            )
+
+    def test_hidden_branch_hides_its_materials_from_employees(self):
+        branch = next(
+            item
+            for item in storage.load_branches()
+            if item["id"] == "client-instructions"
+        )
+        branch["is_visible"] = False
+        storage.save_branch(branch)
+        storage.save_content_item(
+            {
+                "id": "hidden-guide",
+                "section_id": "client",
+                "branch_id": "client-instructions",
+                "item_type": "instruction",
+                "title": "Скрытая инструкция",
+                "body": "Текст",
+                "is_visible": True,
+            }
+        )
+
+        item = storage.load_content_items()[0]
+
+        self.assertFalse(is_public_material(item))
 
     def test_search_filters_rows_inside_new_table(self):
         item = {

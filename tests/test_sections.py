@@ -37,22 +37,16 @@ class SectionStorageTests(unittest.TestCase):
 
         self.assertEqual(
             [section["page_kind"] for section in sections],
-            [
-                "faq",
-                "instructions",
-                "reference_tables",
-                "reference",
-                "templates",
-            ],
+            ["custom", "custom", "custom", "custom", "custom"],
         )
         self.assertEqual(
             [section["title"] for section in sections],
             [
-                "FAQ и рабочие ситуации",
-                "Инструкции и алгоритмы",
-                "Матрицы, нормы и сроки",
-                "Справочник и нормативная база",
-                "Шаблоны и чек-листы",
+                "Работа с клиентом",
+                "Оформление документов",
+                "Испытания и образцы",
+                "Сопровождение",
+                "Справочник и внутренние процессы",
             ],
         )
 
@@ -87,6 +81,78 @@ class SectionStorageTests(unittest.TestCase):
         )
         self.assertFalse(restored["is_visible"])
 
+    def test_default_branches_are_initialized(self):
+        branches = storage.load_branches()
+
+        self.assertEqual(len(branches), 25)
+        expected_titles = [
+            "Инструкции",
+            "Шаблоны",
+            "FAQ",
+            "Чек-листы",
+            "Матрицы и нормы",
+        ]
+        for section_id in ("client", "documents", "testing", "support", "reference"):
+            self.assertEqual(
+                [
+                    branch["title"]
+                    for branch in branches
+                    if branch["section_id"] == section_id
+                ],
+                expected_titles,
+            )
+
+    def test_branch_can_be_created_edited_archived_and_restored(self):
+        branch = {
+            "id": "client-checklists",
+            "section_id": "client",
+            "title": "Проверки",
+            "branch_kind": "checklist",
+            "description": "Проверки перед отправкой",
+            "position": 40,
+            "is_visible": True,
+        }
+        storage.save_branch(branch)
+        branch["title"] = "Чек-листы"
+        storage.save_branch(branch)
+
+        created = next(
+            item
+            for item in storage.load_branches()
+            if item["id"] == "client-checklists"
+        )
+        self.assertEqual(created["title"], "Чек-листы")
+
+        storage.archive_branch("client-checklists")
+        self.assertFalse(
+            any(
+                item["id"] == "client-checklists"
+                for item in storage.load_branches()
+            )
+        )
+        storage.restore_branch("client-checklists")
+        self.assertTrue(
+            any(
+                item["id"] == "client-checklists"
+                for item in storage.load_branches()
+            )
+        )
+
+    def test_non_empty_branch_cannot_be_archived(self):
+        storage.save_content_item(
+            {
+                "id": "client-guide",
+                "section_id": "client",
+                "branch_id": "client-instructions",
+                "item_type": "instruction",
+                "title": "Проверка заявки",
+                "body": "Текст",
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "Сначала перенесите материалы"):
+            storage.archive_branch("client-instructions")
+
     def test_catalog_migration_runs_once_and_preserves_visibility(self):
         with closing(sqlite3.connect(storage.SQLITE_PATH)) as connection:
             storage._create_sections_schema(connection)
@@ -98,11 +164,11 @@ class SectionStorageTests(unittest.TestCase):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    "faq",
+                    "client",
                     "Старое название FAQ",
                     "❓",
                     "Старое описание",
-                    "faq",
+                    "custom",
                     10,
                     0,
                     0,
@@ -111,15 +177,15 @@ class SectionStorageTests(unittest.TestCase):
             connection.commit()
 
         migrated = storage.load_sections()
-        faq = next(section for section in migrated if section["id"] == "faq")
-        self.assertEqual(faq["title"], "FAQ и рабочие ситуации")
-        self.assertFalse(faq["is_visible"])
+        client = next(section for section in migrated if section["id"] == "client")
+        self.assertEqual(client["title"], "Работа с клиентом")
+        self.assertFalse(client["is_visible"])
         self.assertEqual(len(migrated), 5)
 
-        faq["title"] = "Моё название"
-        storage.save_section(faq)
+        client["title"] = "Моё название"
+        storage.save_section(client)
         reloaded = next(
-            section for section in storage.load_sections() if section["id"] == "faq"
+            section for section in storage.load_sections() if section["id"] == "client"
         )
         self.assertEqual(reloaded["title"], "Моё название")
 
@@ -127,19 +193,22 @@ class SectionStorageTests(unittest.TestCase):
         storage.save_content_item(
             {
                 "id": "faq-example",
-                "section_id": "faq",
+                "section_id": "documents",
+                "branch_id": "documents-faq",
                 "item_type": "faq",
                 "title": "Рабочая ситуация",
                 "body": "Краткий ответ",
             }
         )
-        faq = next(
-            section for section in storage.load_sections() if section["id"] == "faq"
+        section = next(
+            section
+            for section in storage.load_sections()
+            if section["id"] == "documents"
         )
-        faq["page_kind"] = "reference_tables"
+        section["page_kind"] = "reference_tables"
 
         with self.assertRaisesRegex(ValueError, "не подходит"):
-            storage.save_section(faq)
+            storage.save_section(section)
 
     def test_admin_page_creates_section(self):
         page = AppTest.from_function(render_sections_test_page).run(timeout=30)

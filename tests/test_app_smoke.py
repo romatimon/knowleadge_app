@@ -8,6 +8,15 @@ import storage
 from streamlit.testing.v1 import AppTest
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def render_control_test_page():
+    from knowledge_base.control import render_content_control
+
+    render_content_control()
+
+
 class AppSmokeTests(unittest.TestCase):
     def test_app_starts_and_admin_can_sign_in(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -19,7 +28,7 @@ class AppSmokeTests(unittest.TestCase):
                 patch.object(storage, "SQLITE_PATH", data_dir / "knowledge.db"),
                 patch.object(storage, "BACKUP_DIR", data_dir / "backups"),
             ):
-                app = AppTest.from_file("app.py").run(timeout=30)
+                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=30)
                 password_input = next(
                     item for item in app.text_input if item.label == "Пароль"
                 )
@@ -32,6 +41,18 @@ class AppSmokeTests(unittest.TestCase):
 
         self.assertEqual(list(app.exception), [])
         self.assertTrue(app.session_state["is_admin"])
+
+    def test_control_page_starts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            with (
+                patch.object(storage, "DATA_DIR", data_dir),
+                patch.object(storage, "SQLITE_PATH", data_dir / "knowledge.db"),
+                patch.object(storage, "BACKUP_DIR", data_dir / "backups"),
+            ):
+                app = AppTest.from_function(render_control_test_page).run(timeout=30)
+
+        self.assertEqual(list(app.exception), [])
 
 
 if __name__ == "__main__":

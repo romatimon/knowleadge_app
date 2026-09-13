@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 from datetime import UTC, date, datetime
@@ -15,6 +16,7 @@ import streamlit as st
 from storage import (
     allowed_item_types,
     archive_content_item,
+    load_branches,
     load_content_items,
     load_sections,
     restore_content_item,
@@ -26,6 +28,8 @@ TYPE_LABELS = {
     "faq": "FAQ / рабочая ситуация",
     "article": "Справка / статья",
     "instruction": "Инструкция",
+    "template": "Шаблон",
+    "checklist": "Чек-лист",
     "table": "Таблица",
 }
 
@@ -51,40 +55,26 @@ COLUMN_TYPE_LABELS = {
 MAX_IMPORT_ROWS = 50_000
 TABLE_ROW_HEIGHT = 80
 
-INSTRUCTION_TEMPLATE = """## Назначение
+TEXT_MATERIAL_TEMPLATE = """## 🎯 Назначение
 
-Кратко опишите результат инструкции.
+Кратко опишите назначение материала и ожидаемый результат.
 
-## Что подготовить
+## 📌 Основные блоки
 
-- Перечислите документы и сведения.
+- Добавьте основные положения, документы или сведения.
 
-## Алгоритм
+## ⚙️ Алгоритмы
 
 1. Выполните первое действие.
 2. Выполните следующее действие.
 
-## Особые случаи
+## ⚠️ Важно
 
 - Опишите исключения и ограничения.
 
-## Результат
+## 📚 Справочная информация
 
-Укажите, как проверить завершение работы.
-"""
-
-FAQ_TEMPLATE = """## Краткий ответ
-
-Дайте сотруднику прямой ответ на вопрос.
-
-## Что делать
-
-1. Укажите первое действие.
-2. Укажите следующее действие.
-
-## Важно
-
-- Опишите ограничения и исключения.
+- Добавьте связанные термины, нормативные документы и пояснения.
 """
 
 
@@ -109,6 +99,7 @@ def filter_content_items(items: list[dict], query: str) -> list[dict]:
                     str(item.get("body", "")),
                     str(item.get("keywords", "")),
                     str(item.get("source", "")),
+                    str(item.get("branch_title", "")),
                     " ".join(
                         str(column.get("label", ""))
                         for column in item.get("table_columns", [])
@@ -175,6 +166,18 @@ def material_relevance(item: dict, today: date | None = None) -> str:
     if review_due and review_due <= (today or datetime.now(UTC).date()):
         return "overdue"
     return "current"
+
+
+def is_public_material(item: dict) -> bool:
+    """Проверяет публикацию материала с учётом состояния его ветки."""
+    if not item.get("is_visible", True) or material_relevance(item) == "draft":
+        return False
+    branch_id = str(item.get("branch_id", "")).strip()
+    if not branch_id:
+        return True
+    return bool(item.get("branch_is_visible")) and not bool(
+        item.get("branch_is_archived")
+    )
 
 
 def _columns_frame(columns: list[dict]) -> pd.DataFrame:
@@ -256,16 +259,20 @@ def _item_label(
     relevance = material_relevance(item)
     marker = STATUS_MARKERS.get(relevance, "")
     label = f"{marker} {item['title']} · {type_label}".strip()
+    branch_title = str(item.get("branch_title", "")).strip()
+    if branch_title:
+        label = f"{branch_title} → {label}"
     if include_section:
         return f"{section.get('title', 'Без раздела')} → {label}"
     return label
 
 
-def _next_position(items: list[dict], section_id: str) -> int:
+def _next_position(items: list[dict], section_id: str, branch_id: str) -> int:
     positions = [
         int(item.get("position", 0))
         for item in items
         if item.get("section_id") == section_id
+        and str(item.get("branch_id", "")) == branch_id
     ]
     return (max(positions) if positions else 0) + 10
 
@@ -285,10 +292,36 @@ def _render_settings_form(
     selected: dict,
     item_type: str,
     section_id: str,
+    branch_id: str,
+    branches: list[dict],
     active_items: list[dict],
 ) -> None:
-    with st.form(f"material_form_{selected_id or 'new'}_{item_type}"):
+    with st.form(
+        f"material_form_{selected_id or 'new'}_{item_type}_{branch_id or 'none'}_"
+        f"{selected.get('_form_variant', 'default')}"
+    ):
         title = st.text_input("Название", value=str(selected.get("title", "")))
+        compatible_branches = [
+            branch
+            for branch in branches
+            if branch.get("section_id") == section_id
+            and branch.get("branch_kind") == item_type
+            and not branch.get("is_archived")
+        ]
+        branch_by_id = {branch["id"]: branch for branch in compatible_branches}
+        branch_options = [""] + list(branch_by_id)
+        current_branch_id = str(selected.get("branch_id", branch_id))
+        if current_branch_id not in branch_options:
+            current_branch_id = ""
+        selected_branch_id = st.selectbox(
+            "Ветка",
+            branch_options,
+            index=branch_options.index(current_branch_id),
+            format_func=lambda value: (
+                "Без ветки" if not value else str(branch_by_id[value]["title"])
+            ),
+            help="Здесь материал можно перенести в другую совместимую ветку.",
+        )
         summary = st.text_area(
             "Краткое описание",
             value=str(selected.get("summary", "")),
@@ -345,14 +378,11 @@ def _render_settings_form(
                 help="Можно использовать Markdown: заголовки, списки и выделение.",
             )
         else:
-            if selected_id:
-                default_body = str(selected.get("body", ""))
-            elif item_type == "instruction":
-                default_body = INSTRUCTION_TEMPLATE
-            elif item_type == "faq":
-                default_body = FAQ_TEMPLATE
-            else:
-                default_body = ""
+            default_body = (
+                str(selected.get("body", ""))
+                if selected_id
+                else TEXT_MATERIAL_TEMPLATE
+            )
             body = st.text_area(
                 "Текст материала",
                 value=default_body,
@@ -390,6 +420,11 @@ def _render_settings_form(
             value=bool(selected.get("is_visible", True)),
             help="Черновик не публикуется независимо от этой настройки.",
         )
+        is_featured = st.checkbox(
+            "Закрепить на главной",
+            value=bool(selected.get("is_featured", False)),
+            help="Материал появится на главной в блоке «Обратите внимание».",
+        )
 
         with st.expander("Дополнительные настройки"):
             keywords = st.text_area(
@@ -404,17 +439,33 @@ def _render_settings_form(
                 placeholder="Документ, письмо или ссылка",
             )
             position = st.number_input(
-                "Порядок внутри раздела",
+                "Порядок внутри ветки",
                 min_value=0,
                 step=10,
                 value=int(
                     selected.get(
-                        "position", _next_position(active_items, section_id)
+                        "position",
+                        _next_position(active_items, section_id, selected_branch_id),
                     )
                 ),
             )
 
-        submitted = st.form_submit_button("Сохранить материал", type="primary")
+        preview_col, save_col = st.columns(2)
+        preview_requested = preview_col.form_submit_button(
+            "Предпросмотр", width="stretch"
+        )
+        submitted = save_col.form_submit_button(
+            "Сохранить материал", type="primary", width="stretch"
+        )
+
+    if preview_requested:
+        st.markdown("#### Предпросмотр")
+        if summary.strip():
+            st.info(summary.strip())
+        if body.strip():
+            st.markdown(body)
+        elif item_type == "table":
+            st.caption("Памятка к таблице не заполнена.")
 
     if not submitted:
         return
@@ -458,6 +509,7 @@ def _render_settings_form(
         values = {
             "id": selected_id or uuid4().hex,
             "section_id": section_id,
+            "branch_id": selected_branch_id,
             "item_type": item_type,
             "title": clean_title,
             "summary": summary.strip(),
@@ -470,6 +522,7 @@ def _render_settings_form(
                 review_due_at.isoformat() if review_due_at else ""
             ),
             "position": int(position),
+            "is_featured": bool(is_featured),
             "is_visible": bool(is_visible and status != "draft"),
             "is_archived": False,
             "table_columns": columns,
@@ -603,6 +656,82 @@ def _excel_bytes(frame: pd.DataFrame) -> bytes:
 def _safe_filename(value: str) -> str:
     clean = re.sub(r"[^\w.-]+", "_", value.strip(), flags=re.UNICODE).strip("_.")
     return clean or "table"
+
+
+def _read_markdown_file(filename: str, content: bytes) -> dict:
+    """Читает Markdown и простой блок метаданных между строками `---`."""
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("cp1251")
+
+    values = {
+        "title": Path(filename).stem.replace("_", " ").replace("-", " ").strip(),
+        "summary": "",
+        "keywords": "",
+        "source": "",
+        "updated_at": "",
+        "review_due_at": "",
+        "status": "current",
+        "body": text.strip(),
+        "_form_variant": hashlib.sha1(content).hexdigest()[:10],
+    }
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return values
+
+    try:
+        closing_index = next(
+            index
+            for index, line in enumerate(lines[1:], start=1)
+            if line.strip() == "---"
+        )
+    except StopIteration:
+        return values
+
+    allowed_fields = {
+        "title",
+        "summary",
+        "keywords",
+        "source",
+        "updated_at",
+        "review_due_at",
+        "status",
+    }
+    for line in lines[1:closing_index]:
+        if ":" not in line:
+            continue
+        key, raw_value = line.split(":", 1)
+        key = key.strip().casefold()
+        if key in allowed_fields:
+            values[key] = raw_value.strip().strip('"').strip("'")
+    values["body"] = "\n".join(lines[closing_index + 1 :]).strip()
+    return values
+
+
+def _markdown_bytes(item: dict) -> bytes:
+    """Экспортирует текстовый материал в переносимый Markdown-файл."""
+    def one_line(value: object) -> str:
+        return str(value or "").replace("\r", " ").replace("\n", " ").strip()
+
+    lines = [
+        "---",
+        f"title: {one_line(item.get('title'))}",
+        f"summary: {one_line(item.get('summary'))}",
+        f"keywords: {one_line(item.get('keywords'))}",
+        f"source: {one_line(item.get('source'))}",
+        f"type: {one_line(item.get('item_type'))}",
+        f"section: {one_line(item.get('section_id'))}",
+        f"branch: {one_line(item.get('branch_title'))}",
+        f"updated_at: {one_line(item.get('updated_at'))}",
+        f"review_due_at: {one_line(item.get('review_due_at'))}",
+        f"status: {one_line(item.get('status', 'current'))}",
+        "---",
+        "",
+        str(item.get("body", "")).strip(),
+        "",
+    ]
+    return "\n".join(lines).encode("utf-8")
 
 
 def _render_import_export(selected: dict) -> None:
@@ -791,7 +920,49 @@ def _render_delete_action(selected_id: str) -> None:
             st.rerun()
 
 
-def _render_active_editor(sections: list[dict], active_items: list[dict]) -> None:
+def _render_duplicate_action(selected: dict, active_items: list[dict]) -> None:
+    """Создаёт безопасную черновую копию материала вместе с таблицей."""
+    if not st.button(
+        "Создать копию",
+        key=f"duplicate_material_{selected['id']}",
+    ):
+        return
+
+    existing_titles = {
+        str(item.get("title", "")).strip().casefold()
+        for item in active_items
+        if item.get("section_id") == selected.get("section_id")
+    }
+    base_title = f"{selected['title']} — копия"
+    title = base_title
+    suffix = 2
+    while title.casefold() in existing_titles:
+        title = f"{base_title} {suffix}"
+        suffix += 1
+
+    duplicate = {
+        **selected,
+        "id": uuid4().hex,
+        "title": title,
+        "status": "draft",
+        "is_visible": False,
+        "is_featured": False,
+        "updated_at": datetime.now(UTC).date().isoformat(),
+        "position": _next_position(
+            active_items,
+            str(selected.get("section_id", "")),
+            str(selected.get("branch_id", "")),
+        ),
+    }
+    if _save_with_feedback(duplicate, "Создана черновая копия материала."):
+        st.rerun()
+
+
+def _render_active_editor(
+    sections: list[dict],
+    branches: list[dict],
+    active_items: list[dict],
+) -> None:
     section_by_id = {section["id"]: section for section in sections}
     section_ids = list(section_by_id)
     section_id = st.selectbox(
@@ -804,13 +975,37 @@ def _render_active_editor(sections: list[dict], active_items: list[dict]) -> Non
     allowed_types = list(
         allowed_item_types(str(section.get("page_kind", "custom")))
     )
+    section_branches = [
+        branch
+        for branch in branches
+        if branch.get("section_id") == section_id and not branch.get("is_archived")
+    ]
+    branch_by_id = {branch["id"]: branch for branch in section_branches}
+    branch_filter = st.selectbox(
+        "2. Выберите ветку",
+        ["__all__", ""] + list(branch_by_id),
+        format_func=lambda value: (
+            "Все ветки"
+            if value == "__all__"
+            else "Без ветки"
+            if not value
+            else str(branch_by_id[value]["title"])
+        ),
+        key=f"material_admin_branch_{section_id}",
+    )
     section_items = [
-        item for item in active_items if item.get("section_id") == section_id
+        item
+        for item in active_items
+        if item.get("section_id") == section_id
+        and (
+            branch_filter == "__all__"
+            or str(item.get("branch_id", "")) == branch_filter
+        )
     ]
     item_by_id = {item["id"]: item for item in section_items}
     options = [""] + list(item_by_id)
     selected_id = st.selectbox(
-        "2. Выберите материал",
+        "3. Выберите материал",
         options,
         format_func=lambda value: (
             "＋ Создать новый материал"
@@ -819,31 +1014,69 @@ def _render_active_editor(sections: list[dict], active_items: list[dict]) -> Non
                 item_by_id[value], section_by_id, include_section=False
             )
         ),
-        key=f"material_admin_select_{section_id}",
+        key=(
+            f"material_admin_select_{section_id}_"
+            f"{branch_filter or 'without_branch'}"
+        ),
     )
-    selected = item_by_id.get(selected_id, {"section_id": section_id})
+    default_branch_id = "" if branch_filter == "__all__" else branch_filter
+    selected = item_by_id.get(
+        selected_id,
+        {"section_id": section_id, "branch_id": default_branch_id},
+    )
 
     if selected_id:
         item_type = str(selected["item_type"])
         st.caption(f"Тип: {TYPE_LABELS[item_type]}")
+    elif branch_filter in branch_by_id:
+        item_type = str(branch_by_id[branch_filter]["branch_kind"])
+        st.caption(f"Будет создан материал типа «{TYPE_LABELS[item_type]}».")
     elif len(allowed_types) == 1:
         item_type = allowed_types[0]
         st.caption(f"Будет создан материал типа «{TYPE_LABELS[item_type]}».")
     else:
         default_type = "article" if "article" in allowed_types else allowed_types[0]
         item_type = st.selectbox(
-            "3. Выберите тип нового материала",
+            "4. Выберите тип нового материала",
             allowed_types,
             index=allowed_types.index(default_type),
             format_func=lambda value: TYPE_LABELS[value],
             key=f"material_type_{section_id}",
         )
 
+    if not selected_id and item_type != "table":
+        with st.expander("Импортировать материал из Markdown (.md)"):
+            uploaded_markdown = st.file_uploader(
+                "Markdown-файл",
+                type=["md"],
+                key=(
+                    f"markdown_import_{section_id}_{default_branch_id or 'none'}_"
+                    f"{item_type}"
+                ),
+            )
+            if uploaded_markdown is not None:
+                try:
+                    imported_values = _read_markdown_file(
+                        uploaded_markdown.name,
+                        uploaded_markdown.getvalue(),
+                    )
+                except (UnicodeError, ValueError) as error:
+                    st.error(f"Не удалось прочитать Markdown: {error}")
+                else:
+                    selected = {**selected, **imported_values}
+                    st.success("Markdown загружен в форму. Проверьте и сохраните материал.")
+
     if item_type == "table":
         settings_tab, data_tab = st.tabs(["Описание и колонки", "Данные"])
         with settings_tab:
             _render_settings_form(
-                selected_id, selected, item_type, section_id, active_items
+                selected_id,
+                selected,
+                item_type,
+                section_id,
+                default_branch_id,
+                section_branches,
+                active_items,
             )
         with data_tab:
             if selected_id:
@@ -852,11 +1085,26 @@ def _render_active_editor(sections: list[dict], active_items: list[dict]) -> Non
                 st.info("Сначала настройте и сохраните новую таблицу.")
     else:
         _render_settings_form(
-            selected_id, selected, item_type, section_id, active_items
+            selected_id,
+            selected,
+            item_type,
+            section_id,
+            default_branch_id,
+            section_branches,
+            active_items,
         )
+        if selected_id:
+            st.download_button(
+                "Скачать Markdown",
+                data=_markdown_bytes(selected),
+                file_name=f"{_safe_filename(str(selected['title']))}.md",
+                mime="text/markdown",
+                key=f"markdown_export_{selected_id}",
+            )
 
     if selected_id:
         st.divider()
+        _render_duplicate_action(selected, active_items)
         _render_delete_action(selected_id)
 
 
@@ -894,11 +1142,14 @@ def render_materials_admin() -> None:
         return
 
     items = load_content_items(include_archived=True)
+    branches = load_branches(include_archived=True)
     active_items = [item for item in items if not item["is_archived"]]
     archived_items = [item for item in items if item["is_archived"]]
 
     st.title("🗂️ Материалы")
-    st.caption("Выберите раздел, затем создайте новый или откройте существующий материал.")
+    st.caption(
+        "Выберите раздел и ветку, затем создайте новый или откройте существующий материал."
+    )
 
     attention_items = [
         item
@@ -928,6 +1179,6 @@ def render_materials_admin() -> None:
 
     edit_tab, archive_tab = st.tabs(["Материалы", "Архив"])
     with edit_tab:
-        _render_active_editor(sections, active_items)
+        _render_active_editor(sections, branches, active_items)
     with archive_tab:
         _render_archive(archived_items, sections)

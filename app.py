@@ -5,14 +5,17 @@ from functools import partial
 import pandas as pd
 import streamlit as st
 
+from knowledge_base.control import render_content_control
 from knowledge_base.sections import render_sections_admin
 from knowledge_base.materials import (
     filter_content_items,
+    is_public_material,
     material_relevance,
     render_materials_admin,
     table_column_width,
 )
 from storage import (
+    load_branches,
     load_content_items,
     load_sections,
 )
@@ -179,12 +182,16 @@ def render_content_items(items, search_query="", section_titles=None):
         "faq": "❓",
         "article": "📄",
         "instruction": "🧭",
+        "template": "📝",
+        "checklist": "✅",
         "table": "📊",
     }
     type_labels = {
         "faq": "FAQ / рабочая ситуация",
         "article": "Справочная статья",
         "instruction": "Инструкция",
+        "template": "Шаблон",
+        "checklist": "Чек-лист",
         "table": "Таблица",
     }
     for item in items:
@@ -198,7 +205,10 @@ def render_content_items(items, search_query="", section_titles=None):
             title,
             expanded=bool(search_query.strip()),
         ):
-            st.caption(type_labels.get(item.get("item_type"), "Материал"))
+            caption_parts = [type_labels.get(item.get("item_type"), "Материал")]
+            if str(item.get("branch_title", "")).strip():
+                caption_parts.append(str(item["branch_title"]))
+            st.caption(" · ".join(caption_parts))
             relevance = material_relevance(item)
             if relevance == "overdue":
                 st.warning(
@@ -252,7 +262,7 @@ def render_content_items(items, search_query="", section_titles=None):
                                 "small"
                                 if column.get("type") == "checkbox"
                                 else table_column_width(len(columns))
-                            ),
+                            ), # type: ignore
                         )
                         for column in columns
                     }
@@ -278,12 +288,12 @@ def render_content_items(items, search_query="", section_titles=None):
                 st.caption(" | ".join(metadata))
 
 
-def render_section_materials(section_id, search_query):
+def render_section_materials(section_id, search_query, branch_id=None):
     """Показывает опубликованные материалы выбранного раздела."""
     items = [
         item
-        for item in load_content_items(section_id=section_id)
-        if item.get("is_visible", True) and material_relevance(item) != "draft"
+        for item in load_content_items(section_id=section_id, branch_id=branch_id)
+        if is_public_material(item)
     ]
     filtered_items = filter_content_items(items, search_query)
     if not filtered_items:
@@ -306,12 +316,14 @@ def render_home_page():
         for section in load_sections()
         if section.get("is_visible", True)
     ]
+    visible_section_ids = {section["id"] for section in sections}
     published_items = [
         item
         for item in load_content_items()
-        if item.get("is_visible", True) and material_relevance(item) != "draft"
+        if is_public_material(item) and item.get("section_id") in visible_section_ids
     ]
     section_titles = {section["id"]: section["title"] for section in sections}
+    branches = load_branches()
 
     st.title("Единая база знаний")
     st.write(
@@ -334,6 +346,29 @@ def render_home_page():
             )
         return
 
+    featured_items = [
+        item for item in published_items if item.get("is_featured", False)
+    ][:5]
+    if featured_items:
+        st.subheader("Обратите внимание")
+        st.caption("Материалы, закреплённые администратором")
+        render_content_items(featured_items, section_titles=section_titles)
+
+    featured_ids = {item["id"] for item in featured_items}
+    recent_items = sorted(
+        (
+            item
+            for item in published_items
+            if item["id"] not in featured_ids
+            and str(item.get("updated_at", "")).strip()
+        ),
+        key=lambda item: str(item.get("updated_at", "")),
+        reverse=True,
+    )[:5]
+    if recent_items:
+        st.subheader("Недавно добавлено и обновлено")
+        render_content_items(recent_items, section_titles=section_titles)
+
     st.subheader("Рабочие направления")
     if not sections:
         st.info("Пока нет опубликованных разделов.")
@@ -350,7 +385,12 @@ def render_home_page():
                 st.markdown(f"### {icon} {title}".strip())
                 if str(section.get("description", "")).strip():
                     st.caption(str(section["description"]))
-                st.caption(f"Материалов: {len(section_items)}")
+                branch_count = sum(
+                    branch.get("section_id") == section["id"] for branch in branches
+                )
+                st.caption(
+                    f"Веток: {branch_count} · Материалов: {len(section_items)}"
+                )
                 page = SECTION_PAGE_BY_ID.get(section["id"])
                 if page is not None:
                     st.page_link(
@@ -363,7 +403,54 @@ def render_home_page():
 def render_custom_section(section):
     """Показывает материалы пользовательского раздела."""
     search_query = render_section_header(section)
-    if not render_section_materials(section["id"], search_query):
+    branches = [
+        branch
+        for branch in load_branches(section_id=section["id"])
+        if branch.get("is_visible", True)
+    ]
+    published_items = [
+        item
+        for item in load_content_items(section_id=section["id"])
+        if is_public_material(item)
+    ]
+    branch_by_id = {branch["id"]: branch for branch in branches}
+    unassigned_count = sum(
+        not str(item.get("branch_id", "")).strip() for item in published_items
+    )
+    options = ["__all__", *branch_by_id]
+    if unassigned_count:
+        options.append("")
+    branch_icons = {
+        "instruction": "📄",
+        "template": "📝",
+        "faq": "❓",
+        "checklist": "✅",
+        "table": "📊",
+        "article": "📚",
+    }
+    selected_branch = st.segmented_control(
+        "Материалы раздела",
+        options,
+        default="__all__",
+        format_func=lambda value: (
+            "Все"
+            if value == "__all__"
+            else "Без ветки"
+            if not value
+            else (
+                f"{branch_icons.get(branch_by_id[value]['branch_kind'], '📁')} "
+                f"{branch_by_id[value]['title']}"
+            )
+        ),
+        key=f"public_branch_{section['id']}",
+    ) or "__all__"
+    branch_id = None if selected_branch == "__all__" else selected_branch
+    if selected_branch in branch_by_id:
+        selected = branch_by_id[selected_branch]
+        if str(selected.get("description", "")).strip():
+            st.caption(str(selected["description"]))
+
+    if not render_section_materials(section["id"], search_query, branch_id):
         if search_query.strip():
             st.info("По вашему запросу ничего не найдено.")
         else:
@@ -414,10 +501,16 @@ if st.session_state.is_admin:
         ),
         st.Page(
             render_sections_admin,
-            title="Разделы и навигация",
+            title="Структура базы",
             icon=":material/settings:",
             url_path="admin-sections",
-        )
+        ),
+        st.Page(
+            render_content_control,
+            title="Контроль базы",
+            icon=":material/fact_check:",
+            url_path="admin-control",
+        ),
     ]
 
 current_page = st.navigation(navigation, position="sidebar")
